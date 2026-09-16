@@ -4,7 +4,7 @@ This is the ground-up rewrite of the energy asset investment simulation, replaci
 
 ## What's in this folder right now (Phase 1 of the roadmap)
 
-- `supabase/migrations/00000000000001_init.sql` — the full database design: markets, assets, financing/offtake options, narrative events, per-asset decision events, sessions, teams. This has been tested against a real local Postgres database and loads cleanly.
+- ` supabase/migrations/00000000000001_init.sql` — the full database design: markets, assets, financing/offtake options, narrative events, per-asset decision events, sessions, teams. This has been tested against a real local Postgres database and loads cleanly.
 - `content/source/renewable-template-export.json` — a copy of the game data you uploaded, kept here so the import can be re-run any time.
 - `scripts/import-template.ts` — a script that reads that export and turns it into `content/seed/seed.sql`, ready to load into a real database. This has already been run against your real data, and the result was checked back against the database line by line (markets, asset costs by year, production, event dependencies, and the per-asset decision choices all came out matching the original file exactly).
 - `content/seed/seed.sql` — the ready-to-load result of that import: 1 template, 6 markets, 64 assets, 174 asset-level decision events, 31 broadcast events, and every year-by-year cost and production number that goes with them.
