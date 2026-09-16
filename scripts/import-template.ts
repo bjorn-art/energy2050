@@ -104,7 +104,8 @@ function slugify(name: string): string {
 function writePhoto(dataUrl: string, id: string): string | null {
   const match = /^data:image\/(\w+);base64,(.+)$/.exec(dataUrl);
   if (!match) return null;
-  const [, ext, base64] = match;
+   const [, ext, base64] = match;
+  if (!ext || !base64) return null; // the regex guarantees these, but satisfies strict TS
   const fileName = `${id}.${ext === "jpeg" ? "jpg" : ext}`;
   mkdirSync(PHOTOS_DIR, { recursive: true });
   writeFileSync(path.join(PHOTOS_DIR, fileName), Buffer.from(base64, "base64"));
