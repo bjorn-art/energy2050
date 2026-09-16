@@ -67,7 +67,17 @@ export default async function SessionPage({ params }: { params: { sessionId: str
               {teams.map((team) => (
                 <tr key={team.id} className="border-b border-slate-900">
                   <td className="py-2">{team.name}</td>
-                  <td className="py-2 font-mono text-slate-300">{team.joinCode}</td>
+                  <td className="py-2 font-mono text-slate-300">
+                    <a
+                      href={`/play/${team.joinCode}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="hover:underline hover:text-emerald-400 transition"
+                      title="Open this team's screen in a new tab"
+                    >
+                      {team.joinCode}
+                    </a>
+                  </td>
                   <td className="py-2 text-right">{team.balance.toLocaleString()}</td>
                   <td className="py-2 text-right">{team.reputation.toLocaleString()}</td>
                 </tr>
