@@ -4,7 +4,7 @@ This is the ground-up rewrite of the energy asset investment simulation, replaci
 
 ## What's in this folder right now (Phase 1 of the roadmap)
 
-- ` supabase/migrations/00000000000001_init.sql` — the full database design: markets, assets, financing/offtake options, narrative events, per-asset decision events, sessions, teams. This has been tested against a real local Postgres database and loads cleanly.
+- `supabase/migrations/00000000000001_init.sql` — the full database design: markets, assets, financing/offtake options, narrative events, per-asset decision events, sessions, teams. This has been tested against a real local Postgres database and loads cleanly.
 - `content/source/renewable-template-export.json` — a copy of the game data you uploaded, kept here so the import can be re-run any time.
 - `scripts/import-template.ts` — a script that reads that export and turns it into `content/seed/seed.sql`, ready to load into a real database. This has already been run against your real data, and the result was checked back against the database line by line (markets, asset costs by year, production, event dependencies, and the per-asset decision choices all came out matching the original file exactly).
 - `content/seed/seed.sql` — the ready-to-load result of that import: 1 template, 6 markets, 64 assets, 174 asset-level decision events, 31 broadcast events, and every year-by-year cost and production number that goes with them.
@@ -35,11 +35,20 @@ Nothing below requires coding. Do these in order, at your own pace, and let Clau
 
 You can sign up for all three with the same email if that's simplest.
 
+## Phase 3 setup: the facilitator console
+
+Two things need to happen once this code is on GitHub (Vercel will then rebuild automatically):
+
+1. **Run the new database migration.** Open your Supabase project's SQL editor and paste in the contents of `supabase/migrations/00000000000002_phase3_sessions.sql`, then run it — same process as the very first schema file. It adds a couple of columns and one small table; it won't touch any of your existing data.
+2. **Set a facilitator password.** In Vercel, go to your project's Settings -> Environment Variables and add `FACILITATOR_PASSWORD` with any password you choose (see `.env.example`). This is the password for `/facilitator` — without it set, that whole section shows a "not configured" message instead of letting anyone in.
+
+Once both are done, `/facilitator` lets you create a session, add teams (each gets a join code — that's for Phase 4, when the team screens exist), and click "Advance year." Balances won't move yet, since investing doesn't exist until Phase 4 — this phase is about the session/team/event mechanics working end-to-end against the real database, which you can check by watching a session's year count go up and its "Year history" list fill in.
+
 ## Roadmap recap
 
-1. **Foundations** (this delivery) — schema, template import, repo scaffold.
-2. Simulation engine — the price and financial math, independent of any screen.
-3. Facilitator console — create a session, advance years, trigger events.
+1. **Foundations** (Phase 1) — schema, template import, repo scaffold. Done, live.
+2. **Simulation engine** (Phase 2) — the price and financial math, independent of any screen. Done, reviewed with Bjorn.
+3. **Facilitator console** (Phase 3, this delivery) — create a session, add teams, advance years, see scheduled events fire.
 4. Team app — market view, investing, portfolio.
-5. Events layer — wiring the broadcast and per-asset decision events into live gameplay.
+5. Events layer — wiring the broadcast and per-asset decision events (including CSR choices) fully into live gameplay.
 6. Polish and a real pilot session.
