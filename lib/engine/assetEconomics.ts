@@ -58,5 +58,6 @@ export function computeAssetYearCashFlow(
 }
 
 function round2(value: number): number {
-  return Math.round(value * 100) / 100;
+  const rounded = Math.round(value * 100) / 100;
+  return rounded === 0 ? 0 : rounded; // normalize -0
 }

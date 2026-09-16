@@ -31,7 +31,8 @@ export function clamp(value: number, min: number, max: number): number {
 }
 
 function round2(value: number): number {
-  return Math.round(value * 100) / 100;
+  const rounded = Math.round(value * 100) / 100;
+  return rounded === 0 ? 0 : rounded; // normalize -0
 }
 
 /**

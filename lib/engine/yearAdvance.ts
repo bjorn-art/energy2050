@@ -39,6 +39,13 @@
  * producing both Oil and Natural Gas) with an offtake attached would have
  * that single price applied to both areas' production, which may not be
  * what the original platform did.
+ *
+ * TAX EFFECTS (SET_ONSHORE/OFFSHORE/RENEWABLES_TAX_PERCENTAGE, applied here
+ * rather than in interventions.ts since it's the one module that knows both
+ * a year's tax rates AND each asset's tax_type): CONFIRMED with Bjorn
+ * (2026-09-16) these tax revenue — a flat percentage off the top, charged
+ * as its own 'tax' transaction right after 'revenue', before opex/capex/
+ * devex/loan payments.
  */
 
 import type {
@@ -70,7 +77,7 @@ export type TeamState = {
 
 /** One line of a team's balance-history log for the year, mirroring team_balance_history's shape. */
 export type BalanceTransaction = {
-  reason: "revenue" | "opex" | "devex" | "capex" | "loan_payment";
+  reason: "revenue" | "tax" | "opex" | "devex" | "capex" | "loan_payment";
   assetId: string;
   delta: number;
   balanceAfter: number;
@@ -88,6 +95,8 @@ export type YearAdvanceResult = {
   /** Market prices after this year's interventions have been applied. */
   prices: Map<string, number>;
   capexMultiplier: number;
+  /** Revenue tax rate per asset tax_type, after this year's interventions — carry this into next year's `SessionYearInput.taxRatesByAssetTaxType`, same as `capexMultiplier`. */
+  taxRatesByAssetTaxType: Map<string, number>;
   unmodeledEffects: UnmodeledEffect[];
   teams: TeamYearResult[];
 };
@@ -98,6 +107,8 @@ export type AssetDataLookup = {
   productionFor(assetId: string, year: number): AssetProduction[];
   financingOptionById(id: string): AssetFinancingOption | undefined;
   offtakeOptionById(id: string): AssetOfftakeOption | undefined;
+  /** The asset's tax_type ('onshore' | 'offshore' | 'renewable'), or null/undefined if it has none — used to look up this year's revenue tax rate, if any. */
+  taxTypeFor(assetId: string): string | null | undefined;
 };
 
 export type SessionYearInput = {
@@ -107,6 +118,8 @@ export type SessionYearInput = {
   basePrices: Map<string, number>;
   /** The capex multiplier carried in from all prior years' interventions (0 = no adjustment). */
   capexMultiplier: number;
+  /** Revenue tax rate per asset tax_type, carried in from all prior years' interventions (empty = no tax anywhere yet). */
+  taxRatesByAssetTaxType: Map<string, number>;
   /** Effects of every intervention scheduled to fire this year. */
   interventionEffects: InterventionEffect[];
   areaIdByName: Map<string, string>;
@@ -117,6 +130,7 @@ export function advanceYear(input: SessionYearInput, lookup: AssetDataLookup): Y
   const market: MarketState = {
     prices: new Map(input.basePrices),
     capexMultiplier: input.capexMultiplier,
+    taxRatesByAssetTaxType: new Map(input.taxRatesByAssetTaxType),
   };
   const unmodeledEffects = applyInterventionEffects(market, input.interventionEffects, input.areaIdByName);
 
@@ -126,6 +140,7 @@ export function advanceYear(input: SessionYearInput, lookup: AssetDataLookup): Y
     year: input.year,
     prices: market.prices,
     capexMultiplier: market.capexMultiplier,
+    taxRatesByAssetTaxType: market.taxRatesByAssetTaxType,
     unmodeledEffects,
     teams,
   };
@@ -182,7 +197,12 @@ function advanceTeamYear(
         priceForArea,
       );
 
+      const taxType = lookup.taxTypeFor(investment.assetId);
+      const taxRate = taxType ? market.taxRatesByAssetTaxType.get(taxType) ?? 0 : 0;
+      const tax = round2(cashFlow.revenue * taxRate);
+
       record("revenue", investment.assetId, cashFlow.revenue);
+      record("tax", investment.assetId, -tax);
       record("opex", investment.assetId, -cashFlow.opex);
       record("devex", investment.assetId, -cashFlow.devex);
       record("capex", investment.assetId, -cashFlow.capex);
@@ -212,7 +232,8 @@ function advanceTeamYear(
 }
 
 function round2(value: number): number {
-  return Math.round(value * 100) / 100;
+  const rounded = Math.round(value * 100) / 100;
+  return rounded === 0 ? 0 : rounded; // normalize -0
 }
 
 /** Re-exported so callers building a full session loop don't need to import from prices.ts separately just to seed the first year's `basePrices`. */

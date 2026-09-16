@@ -12,24 +12,35 @@
  *   - NEW_CO2_CREDITS_PRICE / SET_CO2_TAX_AMOUNT (sets the CO2 Credits price directly to `amount`)
  *     Both source effect types only ever targeted CO2 Credits in the export
  *     and look like two names for the same knob, so they're treated
- *     identically here — worth confirming with Bjorn if the original
- *     platform actually distinguished a "CO2 tax" from the "CO2 credit
- *     price" as separate numbers, since this collapses them into one.
+ *     identically here. CONFIRMED with Bjorn (2026-09-16): keep them as one
+ *     knob rather than splitting into a separate tax vs. credit-price
+ *     mechanic.
  *
  *  MODELED — a global multiplier applied to every asset's capex that year:
  *   - GLOBAL_CAPEX_INCREASE / REVERSE_GLOBAL_CAPEX_INCREASE (percentage, additive to the multiplier)
  *
- *  NOT YET MODELED — recorded on the intervention but not mechanically
- *  applied anywhere yet, because doing so needs a game-design decision
- *  this engine shouldn't make silently:
+ *  MODELED — a per-asset-tax-type revenue tax, applied in yearAdvance.ts (not
+ *  here, since it needs each asset's tax_type, which this module doesn't see):
  *   - SET_OFFSHORE_TAX_PERCENTAGE / SET_ONSHORE_TAX_PERCENTAGE / SET_RENEWABLES_TAX_PERCENTAGE
- *     (would need a decision on gross-vs-net profit, how it stacks with
- *     royalty, etc.)
- *   - CSR_INTERVENTION (presents a team a choice of spend with a
- *     POSITIVE/NEGATIVE/NONE label per choice — the spend itself is just a
- *     balance transaction, but what NEGATIVE/POSITIVE actually *do* beyond
- *     that, e.g. some reputation mechanic, was never specified anywhere in
- *     the source export)
+ *     CONFIRMED with Bjorn (2026-09-16): these tax REVENUE (a flat percentage
+ *     off the top, before opex/capex/devex), not net profit. Each SET_*_TAX
+ *     effect sets that tax type's rate directly (matching the "SET_"
+ *     naming), so a later effect for the same tax type replaces rather than
+ *     stacks with an earlier one in the same session. There's no separate
+ *     royalty percentage anywhere in the source data (`assets.royalty` is
+ *     just a boolean), so "how it stacks with royalty" turned out to be a
+ *     non-issue.
+ *
+ *  NOT AUTOMATICALLY APPLIED HERE — CSR_INTERVENTION presents a team a
+ *  choice (POSITIVE/NEGATIVE/NONE) with an amount they spend, which isn't a
+ *  broadcast market effect like the ones above — it's a per-team decision
+ *  that needs a UI to actually offer the choice (Phase 3+). CONFIRMED with
+ *  Bjorn (2026-09-16): POSITIVE/NEGATIVE should move a team's reputation
+ *  score, in addition to the spend. See csr.ts's `applyCsrChoice` — a small
+ *  pure function ready for the facilitator console to call once a team
+ *  picks a choice and an amount; not wired into applyInterventionEffects or
+ *  yearAdvance.ts since there's no session/team reputation state model yet
+ *  (planned for the Phase 3 schema addition, see architecture-plan.md).
  */
 
 import type { InterventionEffect } from "./types";
@@ -39,6 +50,14 @@ export type MarketState = {
   prices: Map<string, number>;
   /** additive multiplier applied to every asset's capex this year, e.g. 0.1 = +10% */
   capexMultiplier: number;
+  /**
+   * asset tax_type ('onshore' | 'offshore' | 'renewable') -> revenue tax
+   * rate for this year, e.g. 0.05 = 5% of revenue. Read by yearAdvance.ts
+   * when it computes each asset's cash flow; not itself applied to
+   * anything here since this module doesn't know which assets have which
+   * tax_type.
+   */
+  taxRatesByAssetTaxType: Map<string, number>;
 };
 
 const PERCENTAGE_EFFECT_AREA_NAME: Record<string, string> = {
@@ -49,6 +68,12 @@ const PERCENTAGE_EFFECT_AREA_NAME: Record<string, string> = {
 };
 
 const DECREASE_TYPES = new Set(["ELECTRICITY_PRICE_DECREASE"]);
+
+const TAX_EFFECT_TYPE_TO_ASSET_TAX_TYPE: Record<string, string> = {
+  SET_ONSHORE_TAX_PERCENTAGE: "onshore",
+  SET_OFFSHORE_TAX_PERCENTAGE: "offshore",
+  SET_RENEWABLES_TAX_PERCENTAGE: "renewable",
+};
 
 export type UnmodeledEffect = { effectType: string; amount: number };
 
@@ -93,6 +118,11 @@ export function applyInterventionEffects(
       applyPercentageShift(market, areaId, effect.amount, false);
       continue;
     }
+    if (effect.effectType in TAX_EFFECT_TYPE_TO_ASSET_TAX_TYPE) {
+      const assetTaxType = TAX_EFFECT_TYPE_TO_ASSET_TAX_TYPE[effect.effectType]!;
+      market.taxRatesByAssetTaxType.set(assetTaxType, effect.amount);
+      continue;
+    }
 
     unmodeled.push({ effectType: effect.effectType, amount: effect.amount });
   }
@@ -114,5 +144,6 @@ function applyPercentageShift(
 }
 
 function round2(value: number): number {
-  return Math.round(value * 100) / 100;
+  const rounded = Math.round(value * 100) / 100;
+  return rounded === 0 ? 0 : rounded; // normalize -0
 }
