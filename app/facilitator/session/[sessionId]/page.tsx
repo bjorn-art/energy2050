@@ -8,6 +8,7 @@ import {
   PRICE_HORIZON_YEARS,
 } from "../../../../lib/db/repository";
 import { addTeamAction, advanceYearAction } from "../../actions";
+import { stripInlineStyles } from "../../../../lib/format/eventHtml";
 
 export const dynamic = "force-dynamic";
 
@@ -115,8 +116,18 @@ export default async function SessionPage({ params }: { params: { sessionId: str
                       return (
                         <li key={id} className="text-sm">
                           <p className="font-medium text-emerald-400">{intervention.name}</p>
-                          {intervention.subject && <p className="text-slate-300">{intervention.subject}</p>}
-                          {intervention.message && <p className="text-slate-400">{intervention.message}</p>}
+                          {intervention.subject && (
+                            <div
+                              className="text-slate-300 [&_p]:my-1"
+                              dangerouslySetInnerHTML={{ __html: stripInlineStyles(intervention.subject) }}
+                            />
+                          )}
+                          {intervention.message && (
+                            <div
+                              className="text-slate-400 [&_p]:my-1"
+                              dangerouslySetInnerHTML={{ __html: stripInlineStyles(intervention.message) }}
+                            />
+                          )}
                         </li>
                       );
                     })}
