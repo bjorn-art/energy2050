@@ -19,6 +19,7 @@ import { clamp, generateAllPricePaths, generatePricePath } from "../lib/engine/p
 import { computeAssetYearCashFlow } from "../lib/engine/assetEconomics";
 import { generateLoanSchedule, loanScheduleForFinancing, resolveOfftakePrice } from "../lib/engine/financing";
 import { applyInterventionEffects, type MarketState } from "../lib/engine/interventions";
+import { applyCsrChoice } from "../lib/engine/csr";
 import { advanceYear, type AssetDataLookup, type TeamState } from "../lib/engine/yearAdvance";
 import type {
   Area,
@@ -203,7 +204,7 @@ check("loanScheduleForFinancing derives principal from capex * financedPercent",
 
 console.log("interventions.ts");
 check("GLOBAL_CAPEX_INCREASE / REVERSE_GLOBAL_CAPEX_INCREASE adjust the multiplier", () => {
-  const market: MarketState = { prices: new Map(), capexMultiplier: 0 };
+  const market: MarketState = { prices: new Map(), capexMultiplier: 0, taxRatesByAssetTaxType: new Map() };
   applyInterventionEffects(
     market,
     [
@@ -215,7 +216,7 @@ check("GLOBAL_CAPEX_INCREASE / REVERSE_GLOBAL_CAPEX_INCREASE adjust the multipli
   assert.ok(Math.abs(market.capexMultiplier - 0.06) < 1e-9);
 });
 check("OIL_PRICE_INCREASE shifts the named area's price by a percentage", () => {
-  const market: MarketState = { prices: new Map([["oil-id", 75]]), capexMultiplier: 0 };
+  const market: MarketState = { prices: new Map([["oil-id", 75]]), capexMultiplier: 0, taxRatesByAssetTaxType: new Map() };
   const unmodeled = applyInterventionEffects(
     market,
     [{ id: "e1", interventionId: "iv1", effectType: "OIL_PRICE_INCREASE", amount: 0.2, areaId: null }],
@@ -225,7 +226,7 @@ check("OIL_PRICE_INCREASE shifts the named area's price by a percentage", () => 
   assert.deepEqual(unmodeled, []);
 });
 check("ELECTRICITY_PRICE_DECREASE always decreases, regardless of amount's sign", () => {
-  const market: MarketState = { prices: new Map([["el-id", 50]]), capexMultiplier: 0 };
+  const market: MarketState = { prices: new Map([["el-id", 50]]), capexMultiplier: 0, taxRatesByAssetTaxType: new Map() };
   applyInterventionEffects(
     market,
     [{ id: "e1", interventionId: "iv1", effectType: "ELECTRICITY_PRICE_DECREASE", amount: 0.1, areaId: null }],
@@ -234,7 +235,7 @@ check("ELECTRICITY_PRICE_DECREASE always decreases, regardless of amount's sign"
   assert.equal(market.prices.get("el-id"), 45); // 50 * (1 - 0.1)
 });
 check("NEW_CO2_CREDITS_PRICE / SET_CO2_TAX_AMOUNT both set the CO2 price directly", () => {
-  const market: MarketState = { prices: new Map([["co2-id", 10]]), capexMultiplier: 0 };
+  const market: MarketState = { prices: new Map([["co2-id", 10]]), capexMultiplier: 0, taxRatesByAssetTaxType: new Map() };
   applyInterventionEffects(
     market,
     [{ id: "e1", interventionId: "iv1", effectType: "SET_CO2_TAX_AMOUNT", amount: 30, areaId: null }],
@@ -243,18 +244,29 @@ check("NEW_CO2_CREDITS_PRICE / SET_CO2_TAX_AMOUNT both set the CO2 price directl
   assert.equal(market.prices.get("co2-id"), 30);
 });
 check("Unmodeled effect types are reported, not silently dropped", () => {
-  const market: MarketState = { prices: new Map(), capexMultiplier: 0 };
+  const market: MarketState = { prices: new Map(), capexMultiplier: 0, taxRatesByAssetTaxType: new Map() };
+  const unmodeled = applyInterventionEffects(
+    market,
+    [{ id: "e1", interventionId: "iv1", effectType: "CSR_INTERVENTION", amount: 0, areaId: null }],
+    new Map(),
+  );
+  assert.equal(unmodeled.length, 1);
+  assert.equal(unmodeled[0]?.effectType, "CSR_INTERVENTION");
+});
+check("SET_*_TAX_PERCENTAGE effects set that asset tax type's rate directly (later effects replace, not stack)", () => {
+  const market: MarketState = { prices: new Map(), capexMultiplier: 0, taxRatesByAssetTaxType: new Map() };
   const unmodeled = applyInterventionEffects(
     market,
     [
-      { id: "e1", interventionId: "iv1", effectType: "SET_OFFSHORE_TAX_PERCENTAGE", amount: 5, areaId: null },
-      { id: "e2", interventionId: "iv1", effectType: "CSR_INTERVENTION", amount: 0, areaId: null },
+      { id: "e1", interventionId: "iv1", effectType: "SET_OFFSHORE_TAX_PERCENTAGE", amount: 0.1, areaId: null },
+      { id: "e2", interventionId: "iv1", effectType: "SET_ONSHORE_TAX_PERCENTAGE", amount: 0.05, areaId: null },
+      { id: "e3", interventionId: "iv2", effectType: "SET_OFFSHORE_TAX_PERCENTAGE", amount: 0.15, areaId: null },
     ],
     new Map(),
   );
-  assert.equal(unmodeled.length, 2);
-  assert.equal(unmodeled[0]?.effectType, "SET_OFFSHORE_TAX_PERCENTAGE");
-  assert.equal(unmodeled[1]?.effectType, "CSR_INTERVENTION");
+  assert.deepEqual(unmodeled, []);
+  assert.equal(market.taxRatesByAssetTaxType.get("offshore"), 0.15); // replaced by e3, not 0.1 + 0.15
+  assert.equal(market.taxRatesByAssetTaxType.get("onshore"), 0.05);
 });
 
 console.log("yearAdvance.ts");
@@ -282,6 +294,7 @@ check("advanceYear: acquisition-year financing splits capex into down payment + 
     productionFor: (id, year) => (id === assetId ? productionByYear[year] ?? [] : []),
     financingOptionById: (id) => (id === financing.id ? financing : undefined),
     offtakeOptionById: () => undefined,
+    taxTypeFor: () => null,
   };
   const team: TeamState = {
     teamId: "team-1",
@@ -297,7 +310,7 @@ check("advanceYear: acquisition-year financing splits capex into down payment + 
 
   // --- Year 1 (acquisition year) ---
   const year1 = advanceYear(
-    { year: 1, basePrices: new Map([["area-a", 10]]), capexMultiplier: 0, interventionEffects: [], areaIdByName: new Map(), teams: [team] },
+    { year: 1, basePrices: new Map([["area-a", 10]]), capexMultiplier: 0, taxRatesByAssetTaxType: new Map(), interventionEffects: [], areaIdByName: new Map(), teams: [team] },
     lookup,
   );
   const team1 = year1.teams[0]!;
@@ -309,7 +322,7 @@ check("advanceYear: acquisition-year financing splits capex into down payment + 
 
   // --- Year 2 ---
   const year2 = advanceYear(
-    { year: 2, basePrices: new Map([["area-a", 12]]), capexMultiplier: 0, interventionEffects: [], areaIdByName: new Map(), teams: [{ ...team, balance: team1.balanceAfter }] },
+    { year: 2, basePrices: new Map([["area-a", 12]]), capexMultiplier: 0, taxRatesByAssetTaxType: new Map(), interventionEffects: [], areaIdByName: new Map(), teams: [{ ...team, balance: team1.balanceAfter }] },
     lookup,
   );
   const team2 = year2.teams[0]!;
@@ -327,6 +340,7 @@ check("advanceYear: an investment isn't charged or paid before its acquisition y
     productionFor: () => [{ assetId, areaId: "area-a", year: 1, production: 999 }],
     financingOptionById: () => undefined,
     offtakeOptionById: () => undefined,
+    taxTypeFor: () => null,
   };
   const team: TeamState = {
     teamId: "team-1",
@@ -334,7 +348,7 @@ check("advanceYear: an investment isn't charged or paid before its acquisition y
     investments: [{ investmentId: "inv-1", assetId, acquiredYear: 5, financingOptionId: null, offtakeOptionId: null }],
   };
   const result = advanceYear(
-    { year: 1, basePrices: new Map([["area-a", 10]]), capexMultiplier: 0, interventionEffects: [], areaIdByName: new Map(), teams: [team] },
+    { year: 1, basePrices: new Map([["area-a", 10]]), capexMultiplier: 0, taxRatesByAssetTaxType: new Map(), interventionEffects: [], areaIdByName: new Map(), teams: [team] },
     lookup,
   );
   assert.equal(result.teams[0]?.balanceAfter, 500);
@@ -347,6 +361,7 @@ check("advanceYear applies intervention price effects before computing revenue",
     productionFor: () => [{ assetId, areaId: "area-a", year: 1, production: 10 }],
     financingOptionById: () => undefined,
     offtakeOptionById: () => undefined,
+    taxTypeFor: () => null,
   };
   const team: TeamState = {
     teamId: "team-1",
@@ -358,6 +373,7 @@ check("advanceYear applies intervention price effects before computing revenue",
       year: 1,
       basePrices: new Map([["area-a", 10]]),
       capexMultiplier: 0,
+      taxRatesByAssetTaxType: new Map(),
       interventionEffects: [{ id: "e1", interventionId: "iv1", effectType: "PRICE_CHANGE_PERCENTAGE", amount: 0.5, areaId: "area-a" }],
       areaIdByName: new Map(),
       teams: [team],
@@ -367,6 +383,67 @@ check("advanceYear applies intervention price effects before computing revenue",
   // price becomes 15 (10 * 1.5) before revenue is computed
   assert.equal(result.prices.get("area-a"), 15);
   assert.equal(result.teams[0]?.balanceAfter, 150); // 10 * 15
+});
+check("advanceYear charges a revenue tax for an asset whose tax_type has an active rate, carried across years", () => {
+  const assetId = "asset-1";
+  const lookup: AssetDataLookup = {
+    financialsFor: () => ({ assetId, year: 1, capex: 0, opex: 0, devex: 0 }),
+    productionFor: () => [{ assetId, areaId: "area-a", year: 1, production: 10 }],
+    financingOptionById: () => undefined,
+    offtakeOptionById: () => undefined,
+    taxTypeFor: (id) => (id === assetId ? "onshore" : null),
+  };
+  const team: TeamState = {
+    teamId: "team-1",
+    balance: 0,
+    investments: [{ investmentId: "inv-1", assetId, acquiredYear: 1, financingOptionId: null, offtakeOptionId: null }],
+  };
+
+  // Year 1: a SET_ONSHORE_TAX_PERCENTAGE effect fires at 10%.
+  const year1 = advanceYear(
+    {
+      year: 1,
+      basePrices: new Map([["area-a", 10]]),
+      capexMultiplier: 0,
+      taxRatesByAssetTaxType: new Map(),
+      interventionEffects: [{ id: "e1", interventionId: "iv1", effectType: "SET_ONSHORE_TAX_PERCENTAGE", amount: 0.1, areaId: null }],
+      areaIdByName: new Map(),
+      teams: [team],
+    },
+    lookup,
+  );
+  // revenue 10*10=100, tax 10% of that = -10, no opex/capex/devex
+  assert.equal(year1.teams[0]?.balanceAfter, 90);
+  assert.deepEqual(
+    year1.teams[0]?.transactions.map((t) => t.reason),
+    ["revenue", "tax"],
+  );
+
+  // Year 2: no new tax effect fires, but the 10% rate should carry forward
+  // via taxRatesByAssetTaxType, same as capexMultiplier does.
+  const year2 = advanceYear(
+    {
+      year: 2,
+      basePrices: new Map([["area-a", 10]]),
+      capexMultiplier: year1.capexMultiplier,
+      taxRatesByAssetTaxType: year1.taxRatesByAssetTaxType,
+      interventionEffects: [],
+      areaIdByName: new Map(),
+      teams: [{ ...team, balance: year1.teams[0]!.balanceAfter }],
+    },
+    lookup,
+  );
+  assert.equal(year2.teams[0]?.balanceAfter, 90 + 90); // another 100 revenue, 10 tax
+});
+
+console.log("csr.ts");
+check("applyCsrChoice: POSITIVE spends and raises reputation, NEGATIVE spends and lowers it, NONE does neither", () => {
+  assert.deepEqual(applyCsrChoice("POSITIVE", 500), { balanceDelta: -500, reputationDelta: 500 });
+  assert.deepEqual(applyCsrChoice("NEGATIVE", 500), { balanceDelta: -500, reputationDelta: -500 });
+  assert.deepEqual(applyCsrChoice("NONE", 500), { balanceDelta: -500, reputationDelta: 0 });
+});
+check("applyCsrChoice never spends a negative amount", () => {
+  assert.deepEqual(applyCsrChoice("POSITIVE", -100), { balanceDelta: 0, reputationDelta: 0 });
 });
 
 console.log(`\nAll engine tests passed (${passed} checks).`);

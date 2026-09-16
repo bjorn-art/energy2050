@@ -133,6 +133,7 @@ const lookup: AssetDataLookup = {
   productionFor: (id, year) => (id === assetId ? productionByYear.get(year) ?? [] : []),
   financingOptionById: (id) => (id === financing.id ? financing : undefined),
   offtakeOptionById: (id) => (id === offtake.id ? offtake : undefined),
+  taxTypeFor: (id) => (id === assetId ? assetRaw.taxType ?? null : null),
 };
 
 let team: TeamState = {
@@ -145,23 +146,36 @@ let team: TeamState = {
 
 const rng = createRng(20260916); // fixed seed: today's date, so re-runs are comparable
 const pricePaths = generateAllPricePaths(areas, DEMO_YEARS, rng);
-const noInterventionsThisDemo: InterventionEffect[] = [];
+
+// A single intervention at year 8, to show the newly-modeled revenue tax
+// (confirmed with Bjorn on 2026-09-16) actually firing and then carrying
+// forward into later years, same as GLOBAL_CAPEX_INCREASE already did.
+const TAX_INTERVENTION_YEAR = 8;
+const TAX_RATE = 0.1;
 
 console.log(`Starting balance: ${STARTING_BALANCE}`);
-console.log(`Acquiring in year ${ACQUIRED_YEAR}.\n`);
+console.log(`Acquiring in year ${ACQUIRED_YEAR}.`);
+console.log(`Year ${TAX_INTERVENTION_YEAR}: a SET_RENEWABLES_TAX_PERCENTAGE intervention fires at ${TAX_RATE * 100}% (Aquila's tax_type is "renewable").\n`);
 
 let capexMultiplier = 0;
+let taxRatesByAssetTaxType = new Map<string, number>();
 for (let year = 1; year <= DEMO_YEARS; year++) {
   const basePrices = new Map<string, number>();
   for (const area of areas) {
     basePrices.set(area.id, pricePaths.get(area.id)?.[year - 1] ?? area.priceMean);
   }
 
+  const interventionEffects: InterventionEffect[] =
+    year === TAX_INTERVENTION_YEAR
+      ? [{ id: "demo-tax", interventionId: "demo-tax-iv", effectType: "SET_RENEWABLES_TAX_PERCENTAGE", amount: TAX_RATE, areaId: null }]
+      : [];
+
   const result = advanceYear(
-    { year, basePrices, capexMultiplier, interventionEffects: noInterventionsThisDemo, areaIdByName, teams: [team] },
+    { year, basePrices, capexMultiplier, taxRatesByAssetTaxType, interventionEffects, areaIdByName, teams: [team] },
     lookup,
   );
   capexMultiplier = result.capexMultiplier;
+  taxRatesByAssetTaxType = result.taxRatesByAssetTaxType;
   const teamResult = result.teams[0]!;
 
   const electricityPrice = result.prices.get(productionAreaId);
