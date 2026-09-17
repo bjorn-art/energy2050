@@ -48,13 +48,13 @@ Once both are done, `/facilitator` lets you create a session, add teams (each ge
 
 No new setup step this time — the database table this needed (`team_investments`) was already part of the very first schema file, so there's nothing to run in Supabase. Just get the new/changed files onto GitHub (see the delivery message for exactly which ones) and Vercel rebuilds automatically.
 
-What's new: a team opens `/play`, types the join code their facilitator gave them, and lands on their own screen — no password beyond the code itself. From there they can see the session's current market prices, their own portfolio, and a list of investable assets (with a financing choice and an offtake/PPA choice per asset, and an estimated capex figure so they're not investing blind). Clicking "Invest" just records the choice; it doesn't move any money by itself. The actual capex/down-payment/loan/revenue/tax numbers only get charged the next time the facilitator clicks "Advance year" — that's all still `lib/engine`'s job, unchanged from Phase 2/3, so there's exactly one place in the whole app that ever moves a team's balance.
+What's new: a team opens `/play`, types the join code their facilitator gave them, and lands on their own screen — no password beyond the code itself. From there they can see the session's current market prices, their own portfolio, and a list of investable assets (with a financing choice and an offtake/PPA choice per asset, and an estimated capex figure so they're not investing blind). Clicking "Invest" records the choice and, if the asset has an access fee (`assets.minimum_access_cost`), charges that fee immediately. The capex/down-payment/loan/revenue/tax numbers still only get charged the next time the facilitator clicks "Advance year" — that's all still `lib/engine`'s job, unchanged from Phase 2/3.
 
-A few judgment calls made along the way, worth a look before or after a first playtest:
+Confirmed with Bjorn (2026-09-17), resolving the three judgment calls flagged after the first delivery:
 
-- **An asset is exclusive within a session** — once any team invests in it, it disappears from every other team's market. The source data's `minimum_bid`/`bid` columns hint the original platform may have had a competitive-bidding mechanic instead (multiple teams bidding on the same asset, highest bid wins); this rewrite doesn't do that yet. Worth deciding if that's wanted.
-- **`assets.minimum_access_cost` isn't charged anywhere yet.** It's recorded on each investment for later use, but nothing currently deducts it — whether it should be an immediate fee, folded into capex, or dropped is a game-design call.
-- **No affordability check.** A team can invest in something that will charge more than they can currently afford, and their balance can go negative once the facilitator advances the year — same as the engine already allowed before Phase 4, just now something a team can actually trigger themselves.
+- **Assets stay exclusive within a session** — once any team invests in it, it disappears from every other team's market. Keeping the simple first-come model rather than adding competitive bidding.
+- **`assets.minimum_access_cost` is now charged as an immediate fee**, deducted from the team's balance the moment they click "Invest" (logged as its own `access_cost` transaction in `team_balance_history`, dated to the session's current year since it happens before the next year exists).
+- **No affordability check, deliberately.** A team can still invest in something that will charge more than they can currently afford, and their balance can go negative once the facilitator advances the year (or now, immediately, from an access fee) — that's accepted as-is for now.
 
 ## Roadmap recap
 
