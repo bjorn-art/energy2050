@@ -15,9 +15,11 @@
 import { createRng } from "../engine/rng";
 import { generateAllPricePaths } from "../engine/prices";
 import { advanceYear } from "../engine/yearAdvance";
+import { applyCsrChoice, type CsrChoiceType } from "../engine/csr";
 import type {
   Area,
   AssetFinancingOption,
+  AssetIntervention,
   AssetOfftakeOption,
   AssetProduction,
   AssetYearFinancials,
@@ -84,6 +86,7 @@ export type FiredIntervention = {
   name: string;
   subject: string | null;
   message: string | null;
+  photoPath: string | null;
 };
 
 export type AdvanceYearResult = {
@@ -272,10 +275,16 @@ export async function getInterventionsByIds(ids: string[]): Promise<FiredInterve
   const supabase = getSupabaseServerClient();
   const { data, error } = await supabase
     .from("interventions")
-    .select("id, name, subject, message")
+    .select("id, name, subject, message, photo_path")
     .in("id", ids);
   if (error) throw new Error(`Failed to load interventions: ${error.message}`);
-  return (data ?? []).map((row) => ({ id: row.id, name: row.name, subject: row.subject, message: row.message }));
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    name: row.name,
+    subject: row.subject,
+    message: row.message,
+    photoPath: row.photo_path,
+  }));
 }
 
 /**
@@ -635,6 +644,393 @@ export async function createInvestment(input: {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 5: CSR choices
+// ---------------------------------------------------------------------------
+
+export type CsrChoiceOption = {
+  id: string;
+  text: string;
+  choiceType: CsrChoiceType;
+  requiresAmount: boolean;
+};
+
+export type PendingCsrPrompt = {
+  interventionEffectId: string;
+  interventionId: string;
+  interventionName: string;
+  photoPath: string | null;
+  /** The game year this event actually fired in this session. */
+  year: number;
+  choices: CsrChoiceOption[];
+};
+
+/**
+ * CSR_INTERVENTION effects that have fired in this team's session (per
+ * session_year_log) but this team hasn't answered yet (no team_csr_responses
+ * row for it). The real Renewable Template only has 3 of these across the
+ * whole game, so in practice this is a short list, if not empty.
+ */
+export async function listPendingCsrPrompts(sessionId: string, teamId: string): Promise<PendingCsrPrompt[]> {
+  const supabase = getSupabaseServerClient();
+
+  const { data: logRows, error: logError } = await supabase
+    .from("session_year_log")
+    .select("year, fired_intervention_ids")
+    .eq("session_id", sessionId);
+  if (logError) throw new Error(`Failed to load year log: ${logError.message}`);
+
+  const yearByInterventionId = new Map<string, number>();
+  for (const row of logRows ?? []) {
+    for (const id of row.fired_intervention_ids ?? []) {
+      yearByInterventionId.set(id, row.year);
+    }
+  }
+  const firedInterventionIds = [...yearByInterventionId.keys()];
+  if (firedInterventionIds.length === 0) return [];
+
+  const [effectsRes, respondedRes] = await Promise.all([
+    supabase
+      .from("intervention_effects")
+      .select("id, intervention_id")
+      .eq("effect_type", "CSR_INTERVENTION")
+      .in("intervention_id", firedInterventionIds),
+    supabase.from("team_csr_responses").select("intervention_effect_id").eq("team_id", teamId),
+  ]);
+  if (effectsRes.error) throw new Error(`Failed to load CSR effects: ${effectsRes.error.message}`);
+  if (respondedRes.error) throw new Error(`Failed to load CSR responses: ${respondedRes.error.message}`);
+
+  const respondedIds = new Set((respondedRes.data ?? []).map((row) => row.intervention_effect_id as string));
+  const pendingEffects = (effectsRes.data ?? []).filter((row) => !respondedIds.has(row.id as string));
+  if (pendingEffects.length === 0) return [];
+
+  const interventionIds = [...new Set(pendingEffects.map((row) => row.intervention_id as string))];
+  const effectIds = pendingEffects.map((row) => row.id as string);
+
+  const [interventionsRes, choicesRes] = await Promise.all([
+    supabase.from("interventions").select("id, name, photo_path").in("id", interventionIds),
+    supabase
+      .from("intervention_effect_choices")
+      .select("id, effect_id, text, choice_type, requires_amount")
+      .in("effect_id", effectIds),
+  ]);
+  if (interventionsRes.error) throw new Error(`Failed to load interventions: ${interventionsRes.error.message}`);
+  if (choicesRes.error) throw new Error(`Failed to load CSR choices: ${choicesRes.error.message}`);
+
+  const nameByIntervention = new Map<string, string>((interventionsRes.data ?? []).map((row) => [row.id, row.name]));
+  const photoByIntervention = new Map<string, string | null>(
+    (interventionsRes.data ?? []).map((row) => [row.id, row.photo_path]),
+  );
+
+  const choicesByEffect = new Map<string, CsrChoiceOption[]>();
+  for (const row of choicesRes.data ?? []) {
+    const option: CsrChoiceOption = {
+      id: row.id,
+      text: row.text,
+      choiceType: row.choice_type as CsrChoiceType,
+      requiresAmount: row.requires_amount,
+    };
+    if (!choicesByEffect.has(row.effect_id)) choicesByEffect.set(row.effect_id, []);
+    choicesByEffect.get(row.effect_id)!.push(option);
+  }
+
+  return pendingEffects
+    .map(
+      (row): PendingCsrPrompt => ({
+        interventionEffectId: row.id,
+        interventionId: row.intervention_id,
+        interventionName: nameByIntervention.get(row.intervention_id) ?? "Untitled event",
+        photoPath: photoByIntervention.get(row.intervention_id) ?? null,
+        year: yearByInterventionId.get(row.intervention_id) ?? 0,
+        choices: choicesByEffect.get(row.id) ?? [],
+      }),
+    )
+    .sort((a, b) => a.year - b.year);
+}
+
+/**
+ * Records a team's answer to a CSR_INTERVENTION prompt and applies its
+ * balance/reputation effect immediately (lib/engine/csr.ts's
+ * applyCsrChoice) — the one other exception, alongside Phase 4's
+ * access-cost fee, to "only advanceSessionYear moves a team's balance."
+ * Check-then-insert against team_csr_responses' unique
+ * (team_id, intervention_effect_id) pair guards against answering the same
+ * prompt twice (same caveat as every other check-then-insert in this file:
+ * good enough for a facilitated live session, not a real transaction).
+ */
+export async function respondToCsr(input: {
+  teamId: string;
+  interventionEffectId: string;
+  choiceId: string;
+  amount: number;
+}): Promise<void> {
+  const supabase = getSupabaseServerClient();
+
+  const { data: teamRow, error: teamError } = await supabase
+    .from("teams")
+    .select("id, session_id, balance, reputation")
+    .eq("id", input.teamId)
+    .maybeSingle();
+  if (teamError) throw new Error(`Failed to load team: ${teamError.message}`);
+  if (!teamRow) throw new Error("Team not found.");
+
+  const { data: existing, error: existingError } = await supabase
+    .from("team_csr_responses")
+    .select("id")
+    .eq("team_id", input.teamId)
+    .eq("intervention_effect_id", input.interventionEffectId)
+    .maybeSingle();
+  if (existingError) throw new Error(`Failed to check for an existing response: ${existingError.message}`);
+  if (existing) throw new Error("This team has already answered this prompt.");
+
+  const { data: effectRow, error: effectError } = await supabase
+    .from("intervention_effects")
+    .select("id, intervention_id, effect_type")
+    .eq("id", input.interventionEffectId)
+    .maybeSingle();
+  if (effectError) throw new Error(`Failed to load the CSR effect: ${effectError.message}`);
+  if (!effectRow || effectRow.effect_type !== "CSR_INTERVENTION") throw new Error("This isn't a CSR prompt.");
+
+  const { data: choiceRow, error: choiceError } = await supabase
+    .from("intervention_effect_choices")
+    .select("id, effect_id, choice_type, requires_amount")
+    .eq("id", input.choiceId)
+    .maybeSingle();
+  if (choiceError) throw new Error(`Failed to load the chosen option: ${choiceError.message}`);
+  if (!choiceRow || choiceRow.effect_id !== input.interventionEffectId) {
+    throw new Error("That option doesn't belong to this prompt.");
+  }
+
+  // Which year this intervention actually fired in this team's session, for
+  // the audit trail (team_csr_responses.year / team_balance_history.year).
+  const { data: logRows, error: logError } = await supabase
+    .from("session_year_log")
+    .select("year, fired_intervention_ids")
+    .eq("session_id", teamRow.session_id);
+  if (logError) throw new Error(`Failed to load year log: ${logError.message}`);
+  const firedYear = (logRows ?? []).find((row) =>
+    (row.fired_intervention_ids ?? []).includes(effectRow.intervention_id),
+  )?.year;
+  if (firedYear === undefined) throw new Error("This event hasn't fired in this session yet.");
+
+  const choiceType = choiceRow.choice_type as CsrChoiceType;
+  const amount = choiceRow.requires_amount ? Math.max(0, round2(Number(input.amount))) : 0;
+  const { balanceDelta, reputationDelta } = applyCsrChoice(choiceType, amount);
+
+  const balanceAfter = round2(Number(teamRow.balance) + balanceDelta);
+  const reputationAfter = round2(Number(teamRow.reputation) + reputationDelta);
+
+  const { error: teamUpdateError } = await supabase
+    .from("teams")
+    .update({ balance: balanceAfter, reputation: reputationAfter })
+    .eq("id", input.teamId);
+  if (teamUpdateError) throw new Error(`Failed to update team: ${teamUpdateError.message}`);
+
+  if (balanceDelta !== 0) {
+    const { error: historyError } = await supabase.from("team_balance_history").insert({
+      team_id: input.teamId,
+      year: firedYear,
+      delta: balanceDelta,
+      balance_after: balanceAfter,
+      reason: "csr",
+    });
+    if (historyError) throw new Error(`Failed to log the CSR spend: ${historyError.message}`);
+  }
+
+  const { error: insertError } = await supabase.from("team_csr_responses").insert({
+    team_id: input.teamId,
+    intervention_effect_id: input.interventionEffectId,
+    choice_id: input.choiceId,
+    choice_type: choiceType,
+    amount,
+    balance_delta: balanceDelta,
+    reputation_delta: reputationDelta,
+    year: firedYear,
+  });
+  if (insertError) throw new Error(`Failed to record the response: ${insertError.message}`);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5: per-asset decision points
+// ---------------------------------------------------------------------------
+
+export type AssetDecisionOption = {
+  assetInterventionId: string;
+  choiceText: string | null;
+  photoPath: string | null;
+};
+
+export type AssetDecision = {
+  assetId: string;
+  assetName: string;
+  /** The game year this decision actually takes effect if picked now (owning team's acquiredYear + the decision's own relative year - 1). */
+  fireYear: number;
+  subject: string | null;
+  message: string | null;
+  options: AssetDecisionOption[];
+};
+
+/**
+ * Per-asset decision points (asset_interventions) available for a team to
+ * answer right now: tied to an asset this team owns, not yet answered, not
+ * gated behind an earlier choice the team hasn't made, and due within the
+ * next year. A "decision" is a group of asset_interventions rows sharing
+ * the same (asset_id, year) — see the Phase 5 migration's comment on why
+ * the source data represents a multi-option decision as sibling rows
+ * instead of one row with a list.
+ */
+export async function listPendingAssetDecisions(session: SessionDetail, teamId: string): Promise<AssetDecision[]> {
+  const supabase = getSupabaseServerClient();
+
+  const { data: investmentRows, error: investmentsError } = await supabase
+    .from("team_investments")
+    .select("asset_id, acquired_year")
+    .eq("team_id", teamId);
+  if (investmentsError) throw new Error(`Failed to load team investments: ${investmentsError.message}`);
+  const ownedAssets = investmentRows ?? [];
+  if (ownedAssets.length === 0) return [];
+
+  const acquiredYearByAsset = new Map<string, number>(
+    ownedAssets.map((row) => [row.asset_id as string, row.acquired_year as number]),
+  );
+  const assetIds = [...acquiredYearByAsset.keys()];
+
+  const [assetInterventionsRes, chosenRes] = await Promise.all([
+    supabase
+      .from("asset_interventions")
+      .select("id, asset_id, asset_name, year, subject, message, choice_text, photo_path, dependency")
+      .in("asset_id", assetIds),
+    supabase.from("team_asset_intervention_choices").select("asset_intervention_id").eq("team_id", teamId),
+  ]);
+  if (assetInterventionsRes.error) {
+    throw new Error(`Failed to load asset decisions: ${assetInterventionsRes.error.message}`);
+  }
+  if (chosenRes.error) throw new Error(`Failed to load chosen decisions: ${chosenRes.error.message}`);
+
+  const chosenIds = new Set((chosenRes.data ?? []).map((row) => row.asset_intervention_id as string));
+  const rows = (assetInterventionsRes.data ?? []).filter((row) => row.year != null);
+
+  type GroupRow = (typeof rows)[number];
+  const groups = new Map<string, GroupRow[]>();
+  for (const row of rows) {
+    const key = `${row.asset_id}|${row.year}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(row);
+  }
+
+  const decisions: AssetDecision[] = [];
+  for (const groupRows of groups.values()) {
+    const first = groupRows[0];
+    if (!first) continue;
+    const assetId = first.asset_id as string;
+    const acquiredYear = acquiredYearByAsset.get(assetId);
+    if (acquiredYear == null) continue; // guards the type below; shouldn't happen since assetIds came from this same map
+    const decisionYear = first.year as number;
+    const fireYear = acquiredYear + decisionYear - 1;
+
+    // Not due yet — shown starting one year ahead of when it actually takes
+    // effect, matching how an investable asset's next-year capex is shown
+    // before the team commits, so a decision isn't sprung on them the same
+    // moment it's charged.
+    if (fireYear > session.currentYear + 1) continue;
+
+    // Already resolved — the team picked one of this group's options.
+    if (groupRows.some((row) => chosenIds.has(row.id as string))) continue;
+
+    // Gated behind a specific earlier option the team hasn't chosen yet
+    // (see the Phase 5 delivery notes on the `dependency` field).
+    const dependency = groupRows.find((row) => row.dependency)?.dependency as string | null | undefined;
+    if (dependency && !chosenIds.has(dependency)) continue;
+
+    const subjectRow = groupRows.find((row) => row.subject);
+    const messageRow = groupRows.find((row) => row.message);
+    const photoRow = groupRows.find((row) => row.photo_path);
+
+    decisions.push({
+      assetId,
+      assetName: first.asset_name ?? "Unknown asset",
+      fireYear,
+      subject: subjectRow?.subject ?? null,
+      message: messageRow?.message ?? null,
+      options: [...groupRows]
+        .sort((a, b) => (a.choice_text ?? "").localeCompare(b.choice_text ?? ""))
+        .map((row) => ({
+          assetInterventionId: row.id as string,
+          choiceText: row.choice_text,
+          photoPath: row.photo_path ?? photoRow?.photo_path ?? null,
+        })),
+    });
+  }
+
+  return decisions.sort((a, b) => a.fireYear - b.fireYear);
+}
+
+/**
+ * Records a team's pick for a per-asset decision point. Doesn't touch the
+ * team's balance directly, same spirit as Phase 4's investment choice: the
+ * actual capex/opex/devex/production/price effect only starts counting the
+ * next time the facilitator advances the year (see resolveAssetYear in
+ * lib/engine/yearAdvance.ts), and even then only from the decision's own
+ * fire year on, which can be later than the year it was picked in.
+ */
+export async function chooseAssetIntervention(input: { teamId: string; assetInterventionId: string }): Promise<void> {
+  const supabase = getSupabaseServerClient();
+
+  const { data: decisionRow, error: decisionError } = await supabase
+    .from("asset_interventions")
+    .select("id, asset_id, year, dependency")
+    .eq("id", input.assetInterventionId)
+    .maybeSingle();
+  if (decisionError) throw new Error(`Failed to load the decision: ${decisionError.message}`);
+  if (!decisionRow) throw new Error("Decision not found.");
+
+  const { data: investmentRow, error: investmentError } = await supabase
+    .from("team_investments")
+    .select("id")
+    .eq("team_id", input.teamId)
+    .eq("asset_id", decisionRow.asset_id)
+    .maybeSingle();
+  if (investmentError) throw new Error(`Failed to verify ownership: ${investmentError.message}`);
+  if (!investmentRow) throw new Error("This team doesn't own that asset.");
+
+  // Check-then-insert against the whole (asset_id, year) group, not just
+  // this row — a team can only pick ONE option for a given decision (same
+  // caveat as every other check-then-insert in this file: good enough for a
+  // facilitated live session, not a real transaction).
+  const { data: groupRows, error: groupError } = await supabase
+    .from("asset_interventions")
+    .select("id")
+    .eq("asset_id", decisionRow.asset_id)
+    .eq("year", decisionRow.year);
+  if (groupError) throw new Error(`Failed to check this decision's options: ${groupError.message}`);
+  const groupIds = (groupRows ?? []).map((row) => row.id as string);
+
+  const { data: alreadyChosen, error: chosenError } = await supabase
+    .from("team_asset_intervention_choices")
+    .select("asset_intervention_id")
+    .eq("team_id", input.teamId)
+    .in("asset_intervention_id", groupIds);
+  if (chosenError) throw new Error(`Failed to check for an existing choice: ${chosenError.message}`);
+  if ((alreadyChosen ?? []).length > 0) throw new Error("This team already picked an option for this decision.");
+
+  if (decisionRow.dependency) {
+    const { data: dependencyChoice, error: dependencyError } = await supabase
+      .from("team_asset_intervention_choices")
+      .select("id")
+      .eq("team_id", input.teamId)
+      .eq("asset_intervention_id", decisionRow.dependency)
+      .maybeSingle();
+    if (dependencyError) throw new Error(`Failed to check this decision's prerequisite: ${dependencyError.message}`);
+    if (!dependencyChoice) throw new Error("This decision isn't unlocked yet.");
+  }
+
+  const { error: insertError } = await supabase.from("team_asset_intervention_choices").insert({
+    team_id: input.teamId,
+    asset_intervention_id: input.assetInterventionId,
+  });
+  if (insertError) throw new Error(`Failed to record the choice: ${insertError.message}`);
+}
+
+// ---------------------------------------------------------------------------
 // Template content, loaded into the shapes lib/engine expects
 // ---------------------------------------------------------------------------
 
@@ -681,6 +1077,22 @@ async function loadAssetDataLookup(templateId: string): Promise<AssetDataLookup>
   const assetIds = (assets ?? []).map((a) => a.id as string);
   const taxTypeByAsset = new Map<string, string | null>((assets ?? []).map((a) => [a.id, a.tax_type]));
 
+  // Per-asset decision points (Phase 5) — loaded by template, same as
+  // everything else here, since which ones a team has actually CHOSEN is
+  // team-specific state carried separately on each TeamInvestmentState
+  // (see loadTeamInvestments), not something this shared lookup needs to
+  // know.
+  const { data: assetInterventionRows, error: assetInterventionsError } = await supabase
+    .from("asset_interventions")
+    .select(
+      "id, template_id, asset_id, asset_name, name, year, subject, message, choice_text, photo_path, is_additive, capacity, capacity_factor, tax_type, royalty, electrification_time, simulate_alternatives, dependency",
+    )
+    .eq("template_id", templateId);
+  if (assetInterventionsError) {
+    throw new Error(`Failed to load asset interventions: ${assetInterventionsError.message}`);
+  }
+  const assetInterventionIds = (assetInterventionRows ?? []).map((row) => row.id as string);
+
   if (assetIds.length === 0) {
     // No assets for this template — return an always-empty lookup rather
     // than sending `.in("asset_id", [])` queries (some PostgREST/postgrest-js
@@ -691,25 +1103,57 @@ async function loadAssetDataLookup(templateId: string): Promise<AssetDataLookup>
       financingOptionById: () => undefined,
       offtakeOptionById: () => undefined,
       taxTypeFor: () => null,
+      assetInterventionById: () => undefined,
+      assetInterventionFinancialsFor: () => undefined,
+      assetInterventionProductionFor: () => [],
+      assetInterventionPriceDiffs: () => new Map(),
     };
   }
 
-  const [financialsRes, productionRes, financingRes, offtakeRes] = await Promise.all([
-    supabase.from("asset_year_financials").select("asset_id, year, capex, opex, devex").in("asset_id", assetIds),
-    supabase.from("asset_production").select("asset_id, area_id, year, production").in("asset_id", assetIds),
-    supabase
-      .from("asset_financing_options")
-      .select("id, asset_id, lender, interest_rate_percent, financed_percent, requires_support, down_payment_years")
-      .in("asset_id", assetIds),
-    supabase
-      .from("asset_offtake_options")
-      .select("id, asset_id, name, offtake_type, support_period, support_price")
-      .in("asset_id", assetIds),
-  ]);
+  const [financialsRes, productionRes, financingRes, offtakeRes, aiFinancialsRes, aiProductionRes, aiPriceEffectsRes] =
+    await Promise.all([
+      supabase.from("asset_year_financials").select("asset_id, year, capex, opex, devex").in("asset_id", assetIds),
+      supabase.from("asset_production").select("asset_id, area_id, year, production").in("asset_id", assetIds),
+      supabase
+        .from("asset_financing_options")
+        .select("id, asset_id, lender, interest_rate_percent, financed_percent, requires_support, down_payment_years")
+        .in("asset_id", assetIds),
+      supabase
+        .from("asset_offtake_options")
+        .select("id, asset_id, name, offtake_type, support_period, support_price")
+        .in("asset_id", assetIds),
+      assetInterventionIds.length === 0
+        ? Promise.resolve({ data: [], error: null })
+        : supabase
+            .from("asset_intervention_year_financials")
+            .select("asset_intervention_id, year, capex, opex, devex")
+            .in("asset_intervention_id", assetInterventionIds),
+      assetInterventionIds.length === 0
+        ? Promise.resolve({ data: [], error: null })
+        : supabase
+            .from("asset_intervention_production")
+            .select("asset_intervention_id, area_id, year, production")
+            .in("asset_intervention_id", assetInterventionIds),
+      assetInterventionIds.length === 0
+        ? Promise.resolve({ data: [], error: null })
+        : supabase
+            .from("asset_intervention_price_effects")
+            .select("asset_intervention_id, area_id, price_diff")
+            .in("asset_intervention_id", assetInterventionIds),
+    ]);
   if (financialsRes.error) throw new Error(`Failed to load asset financials: ${financialsRes.error.message}`);
   if (productionRes.error) throw new Error(`Failed to load asset production: ${productionRes.error.message}`);
   if (financingRes.error) throw new Error(`Failed to load financing options: ${financingRes.error.message}`);
   if (offtakeRes.error) throw new Error(`Failed to load offtake options: ${offtakeRes.error.message}`);
+  if (aiFinancialsRes.error) {
+    throw new Error(`Failed to load asset intervention financials: ${aiFinancialsRes.error.message}`);
+  }
+  if (aiProductionRes.error) {
+    throw new Error(`Failed to load asset intervention production: ${aiProductionRes.error.message}`);
+  }
+  if (aiPriceEffectsRes.error) {
+    throw new Error(`Failed to load asset intervention price effects: ${aiPriceEffectsRes.error.message}`);
+  }
 
   const financialsByAssetYear = new Map<string, Map<number, AssetYearFinancials>>();
   for (const row of financialsRes.data ?? []) {
@@ -763,34 +1207,132 @@ async function loadAssetDataLookup(templateId: string): Promise<AssetDataLookup>
     });
   }
 
+  const assetInterventionById = new Map<string, AssetIntervention>(
+    (assetInterventionRows ?? []).map((row) => [
+      row.id,
+      {
+        id: row.id,
+        templateId: row.template_id,
+        assetId: row.asset_id,
+        assetName: row.asset_name,
+        name: row.name,
+        year: row.year,
+        subject: row.subject,
+        message: row.message,
+        choiceText: row.choice_text,
+        photoPath: row.photo_path,
+        isAdditive: row.is_additive,
+        capacity: row.capacity == null ? null : Number(row.capacity),
+        capacityFactor: row.capacity_factor == null ? null : Number(row.capacity_factor),
+        taxType: row.tax_type,
+        royalty: row.royalty,
+        electrificationTime: row.electrification_time == null ? null : Number(row.electrification_time),
+        simulateAlternatives: row.simulate_alternatives,
+        dependency: row.dependency,
+      } satisfies AssetIntervention,
+    ]),
+  );
+
+  const aiFinancialsByIdYear = new Map<string, Map<number, AssetYearFinancials>>();
+  for (const row of aiFinancialsRes.data ?? []) {
+    const financials: AssetYearFinancials = {
+      assetId: assetInterventionById.get(row.asset_intervention_id)?.assetId ?? "",
+      year: row.year,
+      capex: Number(row.capex),
+      opex: Number(row.opex),
+      devex: Number(row.devex),
+    };
+    if (!aiFinancialsByIdYear.has(row.asset_intervention_id)) {
+      aiFinancialsByIdYear.set(row.asset_intervention_id, new Map());
+    }
+    aiFinancialsByIdYear.get(row.asset_intervention_id)!.set(row.year, financials);
+  }
+
+  const aiProductionByIdYear = new Map<string, Map<number, AssetProduction[]>>();
+  for (const row of aiProductionRes.data ?? []) {
+    const production: AssetProduction = {
+      assetId: assetInterventionById.get(row.asset_intervention_id)?.assetId ?? "",
+      areaId: row.area_id,
+      year: row.year,
+      production: Number(row.production),
+    };
+    if (!aiProductionByIdYear.has(row.asset_intervention_id)) {
+      aiProductionByIdYear.set(row.asset_intervention_id, new Map());
+    }
+    const byYear = aiProductionByIdYear.get(row.asset_intervention_id)!;
+    if (!byYear.has(row.year)) byYear.set(row.year, []);
+    byYear.get(row.year)!.push(production);
+  }
+
+  const aiPriceDiffsById = new Map<string, Map<string, number>>();
+  for (const row of aiPriceEffectsRes.data ?? []) {
+    if (!aiPriceDiffsById.has(row.asset_intervention_id)) aiPriceDiffsById.set(row.asset_intervention_id, new Map());
+    aiPriceDiffsById.get(row.asset_intervention_id)!.set(row.area_id, Number(row.price_diff));
+  }
+
   return {
     financialsFor: (assetId, year) => financialsByAssetYear.get(assetId)?.get(year),
     productionFor: (assetId, year) => productionByAssetYear.get(assetId)?.get(year) ?? [],
     financingOptionById: (id) => financingById.get(id),
     offtakeOptionById: (id) => offtakeById.get(id),
     taxTypeFor: (assetId) => taxTypeByAsset.get(assetId) ?? null,
+    assetInterventionById: (id) => assetInterventionById.get(id),
+    assetInterventionFinancialsFor: (id, relativeYear) => aiFinancialsByIdYear.get(id)?.get(relativeYear),
+    assetInterventionProductionFor: (id, relativeYear) => aiProductionByIdYear.get(id)?.get(relativeYear) ?? [],
+    assetInterventionPriceDiffs: (id) => aiPriceDiffsById.get(id) ?? new Map(),
   };
 }
 
-/** Every team's investments in a session, grouped by team_id — used to populate TeamState.investments for advanceSessionYear. */
+/**
+ * Every team's investments in a session, grouped by team_id — used to
+ * populate TeamState.investments for advanceSessionYear. Also loads each
+ * team's chosen per-asset decisions (team_asset_intervention_choices,
+ * Phase 5) and attaches them to the matching investment as
+ * chosenAssetInterventionIds, ordered by when they were chosen — see
+ * TeamInvestmentState's own doc comment on why that order matters.
+ */
 async function loadTeamInvestments(teamIds: string[]): Promise<Map<string, TeamInvestmentState[]>> {
   const result = new Map<string, TeamInvestmentState[]>();
   if (teamIds.length === 0) return result;
 
   const supabase = getSupabaseServerClient();
-  const { data, error } = await supabase
-    .from("team_investments")
-    .select("id, team_id, asset_id, acquired_year, financing_option_id, offtake_option_id")
-    .in("team_id", teamIds);
-  if (error) throw new Error(`Failed to load team investments: ${error.message}`);
+  const [investmentsRes, choicesRes] = await Promise.all([
+    supabase
+      .from("team_investments")
+      .select("id, team_id, asset_id, acquired_year, financing_option_id, offtake_option_id")
+      .in("team_id", teamIds),
+    supabase
+      .from("team_asset_intervention_choices")
+      .select("team_id, asset_intervention_id, created_at")
+      .in("team_id", teamIds)
+      .order("created_at", { ascending: true }),
+  ]);
+  if (investmentsRes.error) throw new Error(`Failed to load team investments: ${investmentsRes.error.message}`);
+  if (choicesRes.error) throw new Error(`Failed to load asset decision choices: ${choicesRes.error.message}`);
 
-  for (const row of data ?? []) {
+  const chosenIdsByTeam = new Map<string, string[]>();
+  for (const row of choicesRes.data ?? []) {
+    if (!chosenIdsByTeam.has(row.team_id)) chosenIdsByTeam.set(row.team_id, []);
+    chosenIdsByTeam.get(row.team_id)!.push(row.asset_intervention_id);
+  }
+
+  for (const row of investmentsRes.data ?? []) {
     const investment: TeamInvestmentState = {
       investmentId: row.id,
       assetId: row.asset_id,
       acquiredYear: row.acquired_year,
       financingOptionId: row.financing_option_id,
       offtakeOptionId: row.offtake_option_id,
+      // A team's chosen decisions aren't stored per-investment, only per-
+      // team — but since assets are exclusive per session (Phase 4), a
+      // team only ever has one investment for a given asset, so every
+      // chosen decision belongs unambiguously to at most one of its
+      // investments. listPendingAssetDecisions/chooseAssetIntervention only
+      // ever let a team choose a decision for an asset THEY own, so this
+      // blanket assignment across all of a team's investments is safe: a
+      // decision id here that doesn't belong to this investment's asset
+      // simply won't match anything in resolveAssetYear's lookup calls.
+      chosenAssetInterventionIds: chosenIdsByTeam.get(row.team_id) ?? [],
     };
     if (!result.has(row.team_id)) result.set(row.team_id, []);
     result.get(row.team_id)!.push(investment);
