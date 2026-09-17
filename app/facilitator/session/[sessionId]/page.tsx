@@ -8,7 +8,7 @@ import {
   PRICE_HORIZON_YEARS,
 } from "../../../../lib/db/repository";
 import { addTeamAction, advanceYearAction } from "../../actions";
-import { stripInlineStyles } from "../../../../lib/format/eventHtml";
+import { eventPhotoUrl, stripInlineStyles } from "../../../../lib/format/eventHtml";
 
 export const dynamic = "force-dynamic";
 
@@ -123,9 +123,18 @@ export default async function SessionPage({ params }: { params: { sessionId: str
                     {entry.firedInterventionIds.map((id) => {
                       const intervention = interventionById.get(id);
                       if (!intervention) return null;
+                      const photoUrl = eventPhotoUrl(intervention.photoPath);
                       return (
                         <li key={id} className="text-sm">
                           <p className="font-medium text-emerald-400">{intervention.name}</p>
+                          {photoUrl && (
+                            // eslint-disable-next-line @next/next/no-img-element -- a handful of small template photos, not worth next/image's config for this
+                            <img
+                              src={photoUrl}
+                              alt=""
+                              className="mt-2 max-h-48 rounded border border-slate-800 object-cover"
+                            />
+                          )}
                           {intervention.subject && (
                             <div
                               className="text-slate-300 [&_p]:my-1"
