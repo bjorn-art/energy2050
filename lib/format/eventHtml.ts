@@ -21,3 +21,19 @@
 export function stripInlineStyles(html: string): string {
   return html.replace(/\s*style="[^"]*"/gi, "");
 }
+
+/**
+ * Interventions and asset_interventions store `photo_path` as
+ * `photos/<id>.<ext>` — where the import script wrote the image on disk,
+ * relative to content/seed/. Those same files are copied into
+ * public/event-photos/ (see the Phase 5 delivery notes) so Next.js serves
+ * them directly; this turns the stored path into the public URL. Returns
+ * null for a missing/malformed path rather than throwing, since a broken
+ * image shouldn't take down the page it's on.
+ */
+export function eventPhotoUrl(photoPath: string | null): string | null {
+  if (!photoPath) return null;
+  const fileName = photoPath.startsWith("photos/") ? photoPath.slice("photos/".length) : photoPath;
+  if (!fileName) return null;
+  return `/event-photos/${fileName}`;
+}
