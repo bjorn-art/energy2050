@@ -4,9 +4,11 @@ import {
   getTeamByJoinCode,
   getTeamPortfolio,
   listInvestableAssets,
+  listPendingAssetDecisions,
+  listPendingCsrPrompts,
 } from "../../../lib/db/repository";
-import { stripInlineStyles } from "../../../lib/format/eventHtml";
-import { investAction } from "./actions";
+import { eventPhotoUrl, stripInlineStyles } from "../../../lib/format/eventHtml";
+import { chooseAssetInterventionAction, investAction, respondCsrAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -31,10 +33,12 @@ export default async function PlayPage({ params }: { params: { teamCode: string 
   const { team, session } = found;
   const isActive = session.status === "active";
 
-  const [portfolio, marketAssets, prices] = await Promise.all([
+  const [portfolio, marketAssets, prices, pendingCsrPrompts, pendingAssetDecisions] = await Promise.all([
     getTeamPortfolio(team.id),
     isActive ? listInvestableAssets(session) : Promise.resolve([]),
     getCurrentAreaPrices(session),
+    listPendingCsrPrompts(session.id, team.id),
+    listPendingAssetDecisions(session, team.id),
   ]);
 
   return (
@@ -58,6 +62,64 @@ export default async function PlayPage({ params }: { params: { teamCode: string 
         <p className="rounded border border-amber-800 bg-amber-950/40 text-amber-300 text-sm p-3">
           This session is {session.status}, so investing is turned off. You can still see your portfolio below.
         </p>
+      )}
+
+      {pendingCsrPrompts.length > 0 && (
+        <section className="space-y-4">
+          <h2 className="text-lg font-medium text-slate-200">Community response needed</h2>
+          {pendingCsrPrompts.map((prompt) => {
+            const photoUrl = eventPhotoUrl(prompt.photoPath);
+            return (
+            <div key={prompt.interventionEffectId} className="rounded border border-emerald-800 bg-emerald-950/20 p-4 space-y-3">
+              <div>
+                <p className="font-medium">{prompt.interventionName}</p>
+                <p className="text-xs text-slate-400">Year {prompt.year} &middot; pick how your team responds</p>
+              </div>
+              {photoUrl && (
+                // eslint-disable-next-line @next/next/no-img-element -- a handful of small template photos, not worth next/image's config for this
+                <img src={photoUrl} alt="" className="max-h-48 rounded border border-slate-800 object-cover" />
+              )}
+              <form action={respondCsrAction} className="space-y-3 text-sm">
+                <input type="hidden" name="teamId" value={team.id} />
+                <input type="hidden" name="teamCode" value={team.joinCode} />
+                <input type="hidden" name="interventionEffectId" value={prompt.interventionEffectId} />
+                <div className="space-y-1">
+                  {prompt.choices.map((choice) => (
+                    <label key={choice.id} className="flex items-start gap-2">
+                      <input type="radio" name="choiceId" value={choice.id} required className="mt-1" />
+                      <span>
+                        {choice.text}
+                        {choice.requiresAmount && (
+                          <span className="text-slate-500"> &mdash; requires an amount below</span>
+                        )}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-slate-400" htmlFor={`amount-${prompt.interventionEffectId}`}>
+                    Amount (only if you picked an option that needs one):
+                  </label>
+                  <input
+                    id={`amount-${prompt.interventionEffectId}`}
+                    type="number"
+                    name="amount"
+                    min="0"
+                    step="0.01"
+                    className="w-32 rounded border border-slate-600 bg-slate-900 px-2 py-1"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="rounded bg-emerald-600 px-4 py-2 font-medium hover:bg-emerald-500 transition"
+                >
+                  Submit response
+                </button>
+              </form>
+            </div>
+            );
+          })}
+        </section>
       )}
 
       <section className="space-y-2">
@@ -99,6 +161,69 @@ export default async function PlayPage({ params }: { params: { teamCode: string 
           </table>
         )}
       </section>
+
+      {pendingAssetDecisions.length > 0 && (
+        <section className="space-y-4">
+          <h2 className="text-lg font-medium text-slate-200">Decisions on your assets</h2>
+          {pendingAssetDecisions.map((decision) => {
+            const photoUrl = eventPhotoUrl(decision.options.find((o) => o.photoPath)?.photoPath ?? null);
+            return (
+              <div
+                key={`${decision.assetId}-${decision.fireYear}`}
+                className="rounded border border-amber-800 bg-amber-950/20 p-4 space-y-3"
+              >
+                <div>
+                  <p className="font-medium">{decision.assetName}</p>
+                  <p className="text-xs text-slate-400">
+                    Takes effect year {decision.fireYear}
+                    {decision.fireYear > session.currentYear ? " (next advance or later)" : ""}
+                  </p>
+                </div>
+                {photoUrl && (
+                  // eslint-disable-next-line @next/next/no-img-element -- a handful of small template photos, not worth next/image's config for this
+                  <img src={photoUrl} alt="" className="max-h-48 rounded border border-slate-800 object-cover" />
+                )}
+                {decision.subject && (
+                  <div
+                    className="text-slate-300 text-sm [&_p]:my-1"
+                    dangerouslySetInnerHTML={{ __html: stripInlineStyles(decision.subject) }}
+                  />
+                )}
+                {decision.message && (
+                  <div
+                    className="text-slate-400 text-sm [&_p]:my-1"
+                    dangerouslySetInnerHTML={{ __html: stripInlineStyles(decision.message) }}
+                  />
+                )}
+                <form action={chooseAssetInterventionAction} className="space-y-2 text-sm">
+                  <input type="hidden" name="teamId" value={team.id} />
+                  <input type="hidden" name="teamCode" value={team.joinCode} />
+                  <div className="space-y-1">
+                    {decision.options.map((option) => (
+                      <label key={option.assetInterventionId} className="flex items-start gap-2">
+                        <input
+                          type="radio"
+                          name="assetInterventionId"
+                          value={option.assetInterventionId}
+                          required
+                          className="mt-1"
+                        />
+                        <span>{option.choiceText ?? "(no description)"}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <button
+                    type="submit"
+                    className="rounded bg-amber-700 px-4 py-2 font-medium hover:bg-amber-600 transition"
+                  >
+                    Confirm choice
+                  </button>
+                </form>
+              </div>
+            );
+          })}
+        </section>
+      )}
 
       {isActive && (
         <section className="space-y-4">
