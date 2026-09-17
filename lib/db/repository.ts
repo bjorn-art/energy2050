@@ -123,6 +123,12 @@ export type InvestableAsset = {
   description: string[];
   taxType: string | null;
   /**
+   * Charged immediately, in full, the moment a team clicks "Invest" —
+   * separate from (and in addition to) capex, which isn't charged until the
+   * facilitator next advances the year. Confirmed with Bjorn (2026-09-17).
+   */
+  accessCost: number;
+  /**
    * Capex for the year this investment would take effect (session's current
    * year + 1), adjusted for the session's current capexMultiplier — the
    * same formula lib/engine/yearAdvance.ts uses. Shown so a team isn't
@@ -420,7 +426,7 @@ export async function listInvestableAssets(session: SessionDetail): Promise<Inve
   const [assetsRes, investedIds] = await Promise.all([
     supabase
       .from("assets")
-      .select("id, name, asset_type, capacity, capacity_factor, risk, tax_type, description")
+      .select("id, name, asset_type, capacity, capacity_factor, risk, tax_type, description, minimum_access_cost")
       .eq("template_id", session.templateId)
       .eq("is_visible", true),
     listInvestedAssetIds(session.id),
@@ -493,6 +499,7 @@ export async function listInvestableAssets(session: SessionDetail): Promise<Inve
         risk: Number(row.risk),
         description: row.description ?? [],
         taxType: row.tax_type,
+        accessCost: round2(Number(row.minimum_access_cost)),
         estimatedCapex: rawCapex == null ? null : round2(rawCapex * (1 + session.capexMultiplier)),
         financingOptions: financingByAsset.get(row.id) ?? [],
         offtakeOptions: offtakeByAsset.get(row.id) ?? [],
@@ -528,25 +535,28 @@ export async function getCurrentAreaPrices(session: SessionDetail): Promise<Area
 }
 
 /**
- * Records a team's decision to invest in an asset. This ONLY writes a
- * team_investments row — it does not touch the team's balance or write any
- * team_balance_history rows. Every actual money movement (the down payment,
- * loan payments, revenue, tax, opex, devex) stays exclusively inside
- * lib/engine's advanceYear, run by advanceSessionYear below, so there's a
- * single place that ever moves a team's balance. Concretely: investing now
- * records the choice; nothing is charged until the facilitator next clicks
- * "Advance year," same as the acquisition-year capex/down-payment/loan
- * mechanics already implemented in yearAdvance.ts.
+ * Records a team's decision to invest in an asset, and charges that asset's
+ * `minimum_access_cost` as an immediate fee (confirmed with Bjorn, 2026-09-17
+ * — see the three flagged Phase 4 assumptions in the project's architecture
+ * doc). This is the one exception to "only advanceSessionYear ever moves a
+ * team's balance": the access cost is charged right here, at the moment of
+ * investing, not deferred to the next "Advance year." Every OTHER money
+ * movement (down payment, loan payments, revenue, tax, opex, devex) still
+ * stays exclusively inside lib/engine's advanceYear, run by
+ * advanceSessionYear below.
  *
  * `acquired_year` is set to the session's *next* year (currentYear + 1) —
  * the year that will be advanced to next — since that's the first year
- * yearAdvance.ts will actually charge this investment's capex.
+ * yearAdvance.ts will actually charge this investment's capex. The access
+ * cost transaction is logged against the session's *current* year (not
+ * yet-advanced), since it happens now, before that next year exists.
  *
- * NOTE for Bjorn: `assets.minimum_access_cost` is recorded on the row (for
- * later use / bookkeeping) but not charged here or anywhere yet — whether
- * it should be an immediate fee on investing, folded into capex, or dropped
- * entirely is a game-design call, not something the source export's raw
- * column name settles on its own.
+ * Not wrapped in a database transaction, same caveat as advanceSessionYear —
+ * PostgREST/supabase-js doesn't expose one from this client. If the balance
+ * update or history insert fails after the investment row is written, the
+ * investment is recorded but the fee wasn't charged; safe to re-run manually
+ * (there's no fee double-charge risk since a re-invest attempt on an
+ * already-owned asset isn't possible — see the exclusivity check below).
  */
 export async function createInvestment(input: {
   teamId: string;
@@ -558,7 +568,7 @@ export async function createInvestment(input: {
 
   const { data: teamRow, error: teamError } = await supabase
     .from("teams")
-    .select("id, session_id")
+    .select("id, session_id, balance")
     .eq("id", input.teamId)
     .maybeSingle();
   if (teamError) throw new Error(`Failed to load team: ${teamError.message}`);
@@ -590,16 +600,38 @@ export async function createInvestment(input: {
     throw new Error("This asset doesn't belong to this session's template.");
   }
 
+  const accessCost = round2(Number(assetRow.minimum_access_cost));
+
   const { error: insertError } = await supabase.from("team_investments").insert({
     team_id: input.teamId,
     asset_id: input.assetId,
     acquired_year: session.currentYear + 1,
     capacity: Number(assetRow.capacity),
-    access_cost: Number(assetRow.minimum_access_cost),
+    access_cost: accessCost,
     financing_option_id: input.financingOptionId,
     offtake_option_id: input.offtakeOptionId,
   });
   if (insertError) throw new Error(`Failed to record investment: ${insertError.message}`);
+
+  if (accessCost !== 0) {
+    const balanceBefore = Number(teamRow.balance);
+    const balanceAfter = round2(balanceBefore - accessCost);
+
+    const { error: balanceError } = await supabase
+      .from("teams")
+      .update({ balance: balanceAfter })
+      .eq("id", input.teamId);
+    if (balanceError) throw new Error(`Failed to charge access cost: ${balanceError.message}`);
+
+    const { error: historyError } = await supabase.from("team_balance_history").insert({
+      team_id: input.teamId,
+      year: session.currentYear,
+      delta: round2(-accessCost),
+      balance_after: balanceAfter,
+      reason: "access_cost",
+    });
+    if (historyError) throw new Error(`Failed to log access cost charge: ${historyError.message}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
