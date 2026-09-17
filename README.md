@@ -56,11 +56,23 @@ Confirmed with Bjorn (2026-09-17), resolving the three judgment calls flagged af
 - **`assets.minimum_access_cost` is now charged as an immediate fee**, deducted from the team's balance the moment they click "Invest" (logged as its own `access_cost` transaction in `team_balance_history`, dated to the session's current year since it happens before the next year exists).
 - **No affordability check, deliberately.** A team can still invest in something that will charge more than they can currently afford, and their balance can go negative once the facilitator advances the year (or now, immediately, from an access fee) — that's accepted as-is for now.
 
+## Phase 5: events layer
+
+One new migration this time: `supabase/migrations/00000000000003_phase5_events.sql` — run it in the Supabase SQL editor the same way you ran the first two. It only adds two small new tables (`team_csr_responses`, `team_asset_intervention_choices`); nothing existing changes.
+
+Three things landed in this phase, all previously in the schema/content but with no screen to act on them:
+
+- **Event photos.** The 6 photos from your original export are now served from `public/event-photos/` and show up next to the events that use them, in the facilitator console's year history and on a team's CSR prompt.
+- **The CSR (community response) choice.** When a broadcast event with a community-spending choice fires (there are 3 of these in the Renewable Template), every team sees it on their own screen with the options — usually 3 real projects plus "these aren't in our focus areas" — and, for the projects, a box to enter how much they're spending. Picking one deducts that amount from the team's balance and moves their reputation score immediately, the same way Phase 4's access fee works (not deferred to the next "Advance year").
+- **Per-asset decision points.** Some assets come with their own decision, tied to a specific year of owning that asset (e.g. Midas's "3 export routes" choice) — a team sees these on their screen for assets they own, picks one, and it reshapes that asset's own costs/production/price from then on. Unlike the CSR choice, this doesn't move any money immediately — like an investment's capex, it only starts counting the next time the facilitator advances the year. Some decisions only unlock after an earlier one was picked a certain way (the source data calls this out explicitly for a handful of assets); those stay hidden until unlocked.
+
+One thing in here is a real judgment call, worth flagging clearly rather than burying in code comments: for each per-asset decision, the source data marks it "additive" (adds to whatever the asset was already going to cost/produce) or leaves it blank. For blank/unmarked decisions, this delivery treats them as **replacing** the asset's own numbers outright rather than adding to them — based on looking at real examples (like Midas, where the three route choices have completely different capex/opex numbers from the asset's own baseline, clearly meant to replace it, not stack with it). This is Claude's own reading of the data, not something confirmed against the original platform's logic, since nothing in the export says which behavior was intended. Worth a specific playtest: pick a per-asset decision for an owned asset, advance the year, and check whether the resulting capex/opex number looks right for that asset. If it doesn't, this is the first place to look.
+
 ## Roadmap recap
 
 1. **Foundations** (Phase 1) — schema, template import, repo scaffold. Done, live.
 2. **Simulation engine** (Phase 2) — the price and financial math, independent of any screen. Done, reviewed with Bjorn.
 3. **Facilitator console** (Phase 3) — create a session, add teams, advance years, see scheduled events fire. Done, live, verified end-to-end.
-4. **Team app** (Phase 4, this delivery) — market view, investing, portfolio. This is what makes "Advance year" actually move money.
-5. Events layer — wiring the broadcast and per-asset decision events (including CSR choices) fully into live gameplay.
+4. **Team app** (Phase 4) — market view, investing, portfolio. This is what makes "Advance year" actually move money. Done, live, design flags resolved.
+5. **Events layer** (Phase 5, this delivery) — event photos, the CSR community-response choice, and per-asset decision points.
 6. Polish and a real pilot session.
