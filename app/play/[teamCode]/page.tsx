@@ -106,7 +106,9 @@ export default async function PlayPage({ params }: { params: { teamCode: string 
           <p className="text-xs text-slate-500">
             Estimated capex is for year {session.currentYear + 1}, the year your investment would take effect if you
             invest now. The actual charge is finalized when the facilitator advances the year, and can change if an
-            event between now and then adjusts costs session-wide.
+            event between now and then adjusts costs session-wide. An asset&apos;s access fee, if it has one, is
+            different: it&apos;s deducted from your balance immediately when you click &ldquo;Invest,&rdquo; not at
+            the next Advance year.
           </p>
 
           {marketAssets.length === 0 ? (
@@ -124,11 +126,18 @@ export default async function PlayPage({ params }: { params: { teamCode: string 
                           ` · ${(asset.capacityFactor * 100).toFixed(0)}% capacity factor`}
                       </p>
                     </div>
-                    {asset.estimatedCapex != null && (
-                      <p className="text-sm font-mono text-slate-300">
-                        Est. capex: {asset.estimatedCapex.toLocaleString()}
-                      </p>
-                    )}
+                    <div className="text-right">
+                      {asset.estimatedCapex != null && (
+                        <p className="text-sm font-mono text-slate-300">
+                          Est. capex: {asset.estimatedCapex.toLocaleString()}
+                        </p>
+                      )}
+                      {asset.accessCost > 0 && (
+                        <p className="text-xs font-mono text-amber-400">
+                          + {asset.accessCost.toLocaleString()} access fee, charged now
+                        </p>
+                      )}
+                    </div>
                   </div>
 
                   {asset.description.map((paragraph, i) => (
