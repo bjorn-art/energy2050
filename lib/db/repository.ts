@@ -1347,7 +1347,7 @@ async function loadInterventionsForYear(
   const supabase = getSupabaseServerClient();
   const { data: interventions, error } = await supabase
     .from("interventions")
-    .select("id, name, subject, message")
+    .select("id, name, subject, message, photo_path")
     .eq("template_id", templateId)
     .eq("year", year);
   if (error) throw new Error(`Failed to load interventions: ${error.message}`);
@@ -1373,6 +1373,7 @@ async function loadInterventionsForYear(
     name: iv.name,
     subject: iv.subject,
     message: iv.message,
+    photoPath: iv.photo_path,
   }));
 
   return { firedInterventions, effects };
