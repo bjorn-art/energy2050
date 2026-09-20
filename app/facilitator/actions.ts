@@ -9,7 +9,17 @@ export async function createSessionAction(formData: FormData) {
   if (typeof name !== "string" || name.trim().length === 0) {
     throw new Error("Session name is required.");
   }
-  const sessionId = await createSession(name.trim());
+  const startingBalanceRaw = formData.get("startingBalance");
+  const startingBalance =
+    typeof startingBalanceRaw === "string" && startingBalanceRaw.trim() !== ""
+      ? Number(startingBalanceRaw)
+      : undefined;
+  if (startingBalance !== undefined && (!Number.isFinite(startingBalance) || startingBalance < 0)) {
+    throw new Error("Starting balance must be a non-negative number.");
+  }
+  // Passing `undefined` here (the blank-input case) lets createSession's
+  // own default parameter apply, same as not passing the argument at all.
+  const sessionId = await createSession(name.trim(), startingBalance);
   redirect(`/facilitator/session/${sessionId}`);
 }
 
