@@ -295,12 +295,23 @@ check("advanceYear: acquisition-year financing splits capex into down payment + 
     financingOptionById: (id) => (id === financing.id ? financing : undefined),
     offtakeOptionById: () => undefined,
     taxTypeFor: () => null,
+    assetInterventionById: () => undefined,
+    assetInterventionFinancialsFor: () => undefined,
+    assetInterventionProductionFor: () => [],
+    assetInterventionPriceDiffs: () => new Map(),
   };
   const team: TeamState = {
     teamId: "team-1",
     balance: 10000,
     investments: [
-      { investmentId: "inv-1", assetId, acquiredYear: 1, financingOptionId: financing.id, offtakeOptionId: null },
+      {
+        investmentId: "inv-1",
+        assetId,
+        acquiredYear: 1,
+        financingOptionId: financing.id,
+        offtakeOptionId: null,
+        chosenAssetInterventionIds: [],
+      },
     ],
   };
 
@@ -341,11 +352,24 @@ check("advanceYear: an investment isn't charged or paid before its acquisition y
     financingOptionById: () => undefined,
     offtakeOptionById: () => undefined,
     taxTypeFor: () => null,
+    assetInterventionById: () => undefined,
+    assetInterventionFinancialsFor: () => undefined,
+    assetInterventionProductionFor: () => [],
+    assetInterventionPriceDiffs: () => new Map(),
   };
   const team: TeamState = {
     teamId: "team-1",
     balance: 500,
-    investments: [{ investmentId: "inv-1", assetId, acquiredYear: 5, financingOptionId: null, offtakeOptionId: null }],
+    investments: [
+      {
+        investmentId: "inv-1",
+        assetId,
+        acquiredYear: 5,
+        financingOptionId: null,
+        offtakeOptionId: null,
+        chosenAssetInterventionIds: [],
+      },
+    ],
   };
   const result = advanceYear(
     { year: 1, basePrices: new Map([["area-a", 10]]), capexMultiplier: 0, taxRatesByAssetTaxType: new Map(), interventionEffects: [], areaIdByName: new Map(), teams: [team] },
@@ -362,11 +386,24 @@ check("advanceYear applies intervention price effects before computing revenue",
     financingOptionById: () => undefined,
     offtakeOptionById: () => undefined,
     taxTypeFor: () => null,
+    assetInterventionById: () => undefined,
+    assetInterventionFinancialsFor: () => undefined,
+    assetInterventionProductionFor: () => [],
+    assetInterventionPriceDiffs: () => new Map(),
   };
   const team: TeamState = {
     teamId: "team-1",
     balance: 0,
-    investments: [{ investmentId: "inv-1", assetId, acquiredYear: 1, financingOptionId: null, offtakeOptionId: null }],
+    investments: [
+      {
+        investmentId: "inv-1",
+        assetId,
+        acquiredYear: 1,
+        financingOptionId: null,
+        offtakeOptionId: null,
+        chosenAssetInterventionIds: [],
+      },
+    ],
   };
   const result = advanceYear(
     {
@@ -392,11 +429,24 @@ check("advanceYear charges a revenue tax for an asset whose tax_type has an acti
     financingOptionById: () => undefined,
     offtakeOptionById: () => undefined,
     taxTypeFor: (id) => (id === assetId ? "onshore" : null),
+    assetInterventionById: () => undefined,
+    assetInterventionFinancialsFor: () => undefined,
+    assetInterventionProductionFor: () => [],
+    assetInterventionPriceDiffs: () => new Map(),
   };
   const team: TeamState = {
     teamId: "team-1",
     balance: 0,
-    investments: [{ investmentId: "inv-1", assetId, acquiredYear: 1, financingOptionId: null, offtakeOptionId: null }],
+    investments: [
+      {
+        investmentId: "inv-1",
+        assetId,
+        acquiredYear: 1,
+        financingOptionId: null,
+        offtakeOptionId: null,
+        chosenAssetInterventionIds: [],
+      },
+    ],
   };
 
   // Year 1: a SET_ONSHORE_TAX_PERCENTAGE effect fires at 10%.
