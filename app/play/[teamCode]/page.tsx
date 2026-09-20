@@ -9,6 +9,7 @@ import {
 } from "../../../lib/db/repository";
 import { eventPhotoUrl, stripInlineStyles } from "../../../lib/format/eventHtml";
 import { chooseAssetInterventionAction, investAction, respondCsrAction } from "./actions";
+import { RealtimeRefresh } from "../../../components/RealtimeRefresh";
 
 export const dynamic = "force-dynamic";
 
@@ -43,6 +44,17 @@ export default async function PlayPage({ params }: { params: { teamCode: string 
 
   return (
     <main className="min-h-screen p-6 md:p-8 max-w-4xl mx-auto space-y-8">
+      <RealtimeRefresh
+        channelName={`play-${team.id}`}
+        watch={[
+          { table: "teams", filter: `id=eq.${team.id}` },
+          { table: "game_sessions", filter: `id=eq.${session.id}` },
+          { table: "team_balance_history", filter: `team_id=eq.${team.id}` },
+          { table: "team_csr_responses", filter: `team_id=eq.${team.id}` },
+          { table: "team_asset_intervention_choices", filter: `team_id=eq.${team.id}` },
+        ]}
+      />
+
       <div>
         <p className="text-slate-400 text-sm">
           {session.name} &middot; Year {session.currentYear} &middot; {session.status}
