@@ -47,10 +47,11 @@ function round2(value: number): number {
 export const PRICE_HORIZON_YEARS = 30;
 
 /**
- * TODO(Bjorn): placeholder starting balance for every team — pick whatever
- * number makes sense for how you want early-game investing to feel. Easy
- * to change here (or move to a per-session setting later) without
- * touching anything else.
+ * Fallback starting balance, used only if a session's own starting_balance
+ * somehow can't be read (shouldn't happen — the column has a database
+ * default of 1000). As of Phase 6 this is a per-session setting, picked on
+ * the "Create session" form (see app/facilitator/page.tsx) rather than a
+ * fixed constant, so Bjorn can tune it per session without touching code.
  */
 export const STARTING_BALANCE = 1000;
 
@@ -71,6 +72,8 @@ export type SessionDetail = {
   priceSeed: number;
   capexMultiplier: number;
   taxRates: Record<string, number>;
+  /** Every team added to this session starts with this balance (Phase 6 — was a hardcoded constant before). */
+  startingBalance: number;
 };
 
 export type TeamSummary = {
@@ -189,7 +192,7 @@ export async function listSessions(): Promise<SessionSummary[]> {
   }));
 }
 
-export async function createSession(name: string): Promise<string> {
+export async function createSession(name: string, startingBalance: number = STARTING_BALANCE): Promise<string> {
   const supabase = getSupabaseServerClient();
   const template = await getDefaultTemplate();
   if (!template) throw new Error("No template loaded yet — run the import script first.");
@@ -204,6 +207,7 @@ export async function createSession(name: string): Promise<string> {
       status: "active",
       current_year: 0,
       price_seed: priceSeed,
+      starting_balance: startingBalance,
     })
     .select("id")
     .single();
@@ -215,7 +219,7 @@ export async function getSession(sessionId: string): Promise<SessionDetail | nul
   const supabase = getSupabaseServerClient();
   const { data, error } = await supabase
     .from("game_sessions")
-    .select("id, name, status, current_year, template_id, price_seed, capex_multiplier, tax_rates")
+    .select("id, name, status, current_year, template_id, price_seed, capex_multiplier, tax_rates, starting_balance")
     .eq("id", sessionId)
     .maybeSingle();
   if (error) throw new Error(`Failed to load session: ${error.message}`);
@@ -229,6 +233,7 @@ export async function getSession(sessionId: string): Promise<SessionDetail | nul
     priceSeed: Number(data.price_seed),
     capexMultiplier: Number(data.capex_multiplier),
     taxRates: (data.tax_rates ?? {}) as Record<string, number>,
+    startingBalance: Number(data.starting_balance),
   };
 }
 
@@ -305,6 +310,14 @@ function generateJoinCode(): string {
 export async function addTeam(sessionId: string, name: string): Promise<TeamSummary> {
   const supabase = getSupabaseServerClient();
 
+  const { data: sessionRow, error: sessionError } = await supabase
+    .from("game_sessions")
+    .select("starting_balance")
+    .eq("id", sessionId)
+    .maybeSingle();
+  if (sessionError) throw new Error(`Failed to load session: ${sessionError.message}`);
+  const startingBalance = sessionRow ? Number(sessionRow.starting_balance) : STARTING_BALANCE;
+
   for (let attempt = 0; attempt < 5; attempt++) {
     const joinCode = generateJoinCode();
     const { data, error } = await supabase
@@ -313,8 +326,8 @@ export async function addTeam(sessionId: string, name: string): Promise<TeamSumm
         session_id: sessionId,
         name,
         join_code: joinCode,
-        starting_balance: STARTING_BALANCE,
-        balance: STARTING_BALANCE,
+        starting_balance: startingBalance,
+        balance: startingBalance,
       })
       .select("id, name, join_code, balance, reputation")
       .single();
@@ -1501,4 +1514,128 @@ export async function advanceSessionYear(sessionId: string): Promise<AdvanceYear
     firedInterventions: interventionData.firedInterventions,
     unmodeledEffectTypes,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6: results view + lightweight content editing
+// ---------------------------------------------------------------------------
+
+/**
+ * How many assets each team currently owns, for the results/leaderboard
+ * view. A separate lightweight query rather than reusing loadTeamInvestments
+ * (which loads full engine-shaped investment state) since all the
+ * leaderboard needs is a count.
+ */
+export async function countInvestmentsByTeam(teamIds: string[]): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  if (teamIds.length === 0) return counts;
+  const supabase = getSupabaseServerClient();
+  const { data, error } = await supabase.from("team_investments").select("team_id").in("team_id", teamIds);
+  if (error) throw new Error(`Failed to load investment counts: ${error.message}`);
+  for (const row of data ?? []) {
+    counts.set(row.team_id, (counts.get(row.team_id) ?? 0) + 1);
+  }
+  return counts;
+}
+
+export type EditableIntervention = {
+  id: string;
+  /** Broadcast events are always scheduled to a specific year in this template — unscheduled (year: null) ones aren't shown here since there's nothing to anchor an edit UI to. */
+  year: number;
+  name: string;
+  subject: string | null;
+  message: string | null;
+  photoPath: string | null;
+};
+
+/**
+ * Every scheduled broadcast event for the default template, for the
+ * facilitator's content-editing screen (/facilitator/content/events). Not
+ * session-specific — editing one of these changes it for every session that
+ * hasn't fired it yet, same as editing the template data always has.
+ */
+export async function listEditableInterventions(): Promise<EditableIntervention[]> {
+  const template = await getDefaultTemplate();
+  if (!template) return [];
+  const supabase = getSupabaseServerClient();
+  const { data, error } = await supabase
+    .from("interventions")
+    .select("id, year, name, subject, message, photo_path")
+    .eq("template_id", template.id)
+    .not("year", "is", null)
+    .order("year", { ascending: true });
+  if (error) throw new Error(`Failed to load events: ${error.message}`);
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    year: row.year,
+    name: row.name,
+    subject: row.subject,
+    message: row.message,
+    photoPath: row.photo_path,
+  }));
+}
+
+/** Updates one event's narrative text. Subject/message are stored (and rendered) as raw HTML — see lib/format/eventHtml.ts — so plain paragraph text works fine here, but existing `<p>`/`<span>` tags will show up literally if typed by hand rather than pasted from the current value. */
+export async function updateInterventionText(input: {
+  id: string;
+  subject: string | null;
+  message: string | null;
+}): Promise<void> {
+  const supabase = getSupabaseServerClient();
+  const { error } = await supabase
+    .from("interventions")
+    .update({ subject: input.subject, message: input.message })
+    .eq("id", input.id);
+  if (error) throw new Error(`Failed to save event: ${error.message}`);
+}
+
+export type EditableAsset = {
+  id: string;
+  name: string;
+  assetType: string;
+  description: string[];
+  risk: number;
+  minimumAccessCost: number;
+};
+
+/** Every asset for the default template, for the facilitator's content-editing screen (/facilitator/content/assets). Deliberately limited to the handful of scalar fields safe to hand-edit without touching the per-year financial/production schedules (those stay code-only for now — see the README's Phase 6 notes). */
+export async function listEditableAssets(): Promise<EditableAsset[]> {
+  const template = await getDefaultTemplate();
+  if (!template) return [];
+  const supabase = getSupabaseServerClient();
+  const { data, error } = await supabase
+    .from("assets")
+    .select("id, name, asset_type, description, risk, minimum_access_cost")
+    .eq("template_id", template.id)
+    .order("asset_type", { ascending: true })
+    .order("name", { ascending: true });
+  if (error) throw new Error(`Failed to load assets: ${error.message}`);
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    name: row.name,
+    assetType: row.asset_type,
+    description: row.description ?? [],
+    risk: Number(row.risk),
+    minimumAccessCost: Number(row.minimum_access_cost),
+  }));
+}
+
+export async function updateAssetBasics(input: {
+  id: string;
+  name: string;
+  description: string[];
+  risk: number;
+  minimumAccessCost: number;
+}): Promise<void> {
+  const supabase = getSupabaseServerClient();
+  const { error } = await supabase
+    .from("assets")
+    .update({
+      name: input.name,
+      description: input.description,
+      risk: input.risk,
+      minimum_access_cost: input.minimumAccessCost,
+    })
+    .eq("id", input.id);
+  if (error) throw new Error(`Failed to save asset: ${error.message}`);
 }
