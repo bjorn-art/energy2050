@@ -9,6 +9,7 @@ import {
 } from "../../../../lib/db/repository";
 import { addTeamAction, advanceYearAction } from "../../actions";
 import { eventPhotoUrl, stripInlineStyles } from "../../../../lib/format/eventHtml";
+import { RealtimeRefresh } from "../../../../components/RealtimeRefresh";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +27,15 @@ export default async function SessionPage({ params }: { params: { sessionId: str
 
   return (
     <main className="min-h-screen p-8 max-w-3xl mx-auto space-y-8">
+      <RealtimeRefresh
+        channelName={`facilitator-session-${session.id}`}
+        watch={[
+          { table: "game_sessions", filter: `id=eq.${session.id}` },
+          { table: "teams", filter: `session_id=eq.${session.id}` },
+          { table: "session_year_log", filter: `session_id=eq.${session.id}` },
+        ]}
+      />
+
       <div>
         <Link href="/facilitator" className="text-sm text-slate-400 hover:text-slate-200 transition">
           &larr; All sessions
@@ -37,18 +47,29 @@ export default async function SessionPage({ params }: { params: { sessionId: str
       </div>
 
       <section className="space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
           <h2 className="text-lg font-medium text-slate-200">Teams</h2>
-          <form action={advanceYearAction}>
-            <input type="hidden" name="sessionId" value={session.id} />
-            <button
-              type="submit"
-              disabled={!canAdvance}
-              className="rounded bg-emerald-600 px-4 py-2 font-medium hover:bg-emerald-500 transition disabled:opacity-40 disabled:cursor-not-allowed"
+          <div className="flex items-center gap-3">
+            <a
+              href={`/results/${session.id}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-sm text-slate-400 hover:text-emerald-400 transition underline"
+              title="Open a live leaderboard view — good for a shared screen or projector"
             >
-              Advance to year {session.currentYear + 1}
-            </button>
-          </form>
+              Results view &#8599;
+            </a>
+            <form action={advanceYearAction}>
+              <input type="hidden" name="sessionId" value={session.id} />
+              <button
+                type="submit"
+                disabled={!canAdvance}
+                className="rounded bg-emerald-600 px-4 py-2 font-medium hover:bg-emerald-500 transition disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Advance to year {session.currentYear + 1}
+              </button>
+            </form>
+          </div>
         </div>
 
         {teams.length === 0 ? (
